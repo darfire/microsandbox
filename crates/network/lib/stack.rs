@@ -226,6 +226,7 @@ pub fn smoltcp_poll_loop(
     max_connections: Option<usize>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
+    transparent_proxy: Option<SocketAddr>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -501,6 +502,7 @@ pub fn smoltcp_poll_loop(
                     tls_state.clone(),
                     network_policy.clone(),
                     conn.proxy_connect,
+                    transparent_proxy,
                 );
                 continue;
             }
@@ -569,6 +571,7 @@ pub fn smoltcp_poll_loop(
                 secrets.load(),
                 tls_state.clone(),
                 conn.proxy_connect,
+                transparent_proxy,
             );
         }
 
