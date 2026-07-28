@@ -1581,6 +1581,7 @@ type NetworkOptions struct {
 	MaxConnections      *uint                `json:"max_connections,omitempty"`
 	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
 	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+	TransparentProxy    string               `json:"transparent_proxy,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.
