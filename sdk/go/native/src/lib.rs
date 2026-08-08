@@ -51,15 +51,16 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, UpperVerifyStatus,
+    default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
-        FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
+        DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
         exec::{ExecControl, ExecEvent, ExecHandle, ExecSink},
         fs::{FsReadStream, FsWriteSink},
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
-    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
+    volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::{builder::ViolationActionBuilder, secrets::config::ViolationAction};
 use tokio::io::AsyncWriteExt;
@@ -951,7 +952,7 @@ struct RegistryAuthOpts {
 
 #[derive(serde::Deserialize)]
 struct RootDiskOpts {
-    /// "managed" | "tmpfs" | "disk-image".
+    /// "managed" | "tmpfs" | "disk-image" | "flat".
     kind: String,
     /// Size in MiB for the managed and tmpfs kinds.
     size_mib: Option<u32>,
@@ -962,6 +963,8 @@ struct RootDiskOpts {
     format: Option<String>,
     /// Inner filesystem type of a disk-image root disk (default ext4).
     fstype: Option<String>,
+    /// Private flat-root clone strategy ("auto" | "copy" | "reflink").
+    clone: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -991,6 +994,7 @@ struct SandboxCreateOpts {
     hostname: Option<String>,
     user: Option<String>,
     security_profile: Option<String>,
+    deployment_profile: Option<String>,
     #[serde(default)]
     replace: bool,
     /// Timeout in milliseconds between SIGTERM and SIGKILL when
@@ -1020,6 +1024,12 @@ struct SandboxCreateOpts {
     idle_timeout_secs: Option<u64>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
+    /// Pull the image over plain HTTP instead of HTTPS (registry override).
+    #[serde(default)]
+    registry_insecure: bool,
+    /// PEM-encoded CA root certificates to trust when pulling.
+    #[serde(default)]
+    registry_ca_certs: Vec<String>,
     network: Option<NetworkOpts>,
     /// Proxy that all outbound sandbox connections are dialed through.
     proxy: Option<OutboundProxyOpts>,
@@ -1552,6 +1562,16 @@ fn parse_security_profile(s: &str) -> Result<SecurityProfile, FfiError> {
     }
 }
 
+fn parse_deployment_profile(s: &str) -> Result<DeploymentProfile, FfiError> {
+    match s {
+        "" | "single-tenant" | "single_tenant" => Ok(DeploymentProfile::SingleTenant),
+        "multi-tenant" | "multi_tenant" => Ok(DeploymentProfile::MultiTenant),
+        _ => Err(FfiError::invalid_argument(format!(
+            "invalid deployment profile: {s} (expected single-tenant or multi-tenant)"
+        ))),
+    }
+}
+
 /// Apply a structured root disk config to the sandbox builder. Kind and
 /// per-kind field combinations are validated here so errors surface as
 /// invalid-argument; sizing/kind guards stay in the core builder.
@@ -1561,10 +1581,13 @@ fn apply_root_disk(
 ) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
     match root_disk.kind.as_str() {
         "managed" | "tmpfs" => {
-            if root_disk.path.is_some() || root_disk.format.is_some() || root_disk.fstype.is_some()
+            if root_disk.path.is_some()
+                || root_disk.format.is_some()
+                || root_disk.fstype.is_some()
+                || root_disk.clone.is_some()
             {
                 return Err(FfiError::invalid_argument(format!(
-                    "path/format/fstype are only valid for a disk-image root disk (got kind={})",
+                    "path/format/fstype/clone are not valid for a {} root disk",
                     root_disk.kind
                 )));
             }
@@ -1580,10 +1603,22 @@ fn apply_root_disk(
                     "size_mib is not valid for a disk-image root disk; resize the image file itself",
                 ));
             }
+            if root_disk.clone.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "clone is only valid for a flat root disk",
+                ));
+            }
+        }
+        "flat" => {
+            if root_disk.path.is_some() || root_disk.format.is_some() {
+                return Err(FfiError::invalid_argument(
+                    "path/format are not valid for a flat root disk",
+                ));
+            }
         }
         other => {
             return Err(FfiError::invalid_argument(format!(
-                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image)"
+                "unknown root disk kind: {other} (expected managed, tmpfs, disk-image, flat)"
             )));
         }
     }
@@ -1595,11 +1630,24 @@ fn apply_root_disk(
                 .map_err(FfiError::invalid_argument)
         })
         .transpose()?;
+    let clone = root_disk
+        .clone
+        .as_deref()
+        .map(|value| match value {
+            "auto" => Ok(microsandbox::sandbox::FlatClone::Auto),
+            "copy" => Ok(microsandbox::sandbox::FlatClone::Copy),
+            "reflink" => Ok(microsandbox::sandbox::FlatClone::Reflink),
+            other => Err(FfiError::invalid_argument(format!(
+                "unknown flat clone strategy: {other} (expected auto, copy, reflink)"
+            ))),
+        })
+        .transpose()?;
 
     Ok(builder.root_disk_with(|mut d| {
         match root_disk.kind.as_str() {
             "tmpfs" => d = d.tmpfs(),
             "disk-image" => d = d.disk_image(root_disk.path.as_deref().unwrap_or_default()),
+            "flat" => d = d.flat(),
             _ => {}
         }
         if let Some(size_mib) = root_disk.size_mib {
@@ -1610,6 +1658,9 @@ fn apply_root_disk(
         }
         if let Some(fstype) = root_disk.fstype {
             d = d.fstype(fstype);
+        }
+        if let Some(clone) = clone {
+            d = d.clone_strategy(clone);
         }
         d
     }))
@@ -1990,6 +2041,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             Some(s) => Some(parse_security_profile(s)?),
             None => None,
         };
+        let deployment_profile = match opts.deployment_profile.as_deref() {
+            Some(s) => Some(parse_deployment_profile(s)?),
+            None => None,
+        };
 
         Ok(Box::pin(async move {
             let mut builder = Sandbox::builder(&name);
@@ -2062,6 +2117,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             if let Some(profile) = security_profile {
                 builder = builder.security(profile);
             }
+            if let Some(profile) = deployment_profile {
+                builder = builder.deployment_profile(profile);
+            }
             if let Some(timeout_ms) = opts.replace_with_timeout_ms {
                 builder =
                     builder.replace_with_timeout(std::time::Duration::from_millis(timeout_ms));
@@ -2101,12 +2159,26 @@ pub unsafe extern "C" fn msb_sandbox_create(
             {
                 builder = builder.idle_timeout(secs);
             }
-            if let Some(auth) = opts.registry_auth {
-                builder = builder.registry(|r| {
-                    r.auth(RegistryAuth::Basic {
-                        username: auth.username,
-                        password: auth.password,
-                    })
+            // `registry` overwrites insecure and ca_certs wholesale, so all
+            // three overrides have to be applied in one call.
+            let registry_auth = opts.registry_auth;
+            let registry_insecure = opts.registry_insecure;
+            let registry_ca_certs = opts.registry_ca_certs;
+            if registry_auth.is_some() || registry_insecure || !registry_ca_certs.is_empty() {
+                builder = builder.registry(|mut r| {
+                    if let Some(auth) = registry_auth {
+                        r = r.auth(RegistryAuth::Basic {
+                            username: auth.username,
+                            password: auth.password,
+                        });
+                    }
+                    if registry_insecure {
+                        r = r.insecure();
+                    }
+                    for pem in registry_ca_certs {
+                        r = r.ca_certs(pem.into_bytes());
+                    }
+                    r
                 });
             }
             for (k, v) in opts.env.unwrap_or_default() {
@@ -2164,8 +2236,13 @@ pub unsafe extern "C" fn msb_sandbox_create(
             } else {
                 builder.create().await?
             };
+            let backend_kind = sandbox.backend_kind().as_str();
             let handle = register(sandbox)?;
-            Ok(format!(r#"{{"handle":{handle}}}"#))
+            Ok(serde_json::json!({
+                "handle": handle,
+                "backend_kind": backend_kind,
+            })
+            .to_string())
         }))
     })
 }
@@ -2300,6 +2377,7 @@ pub unsafe extern "C" fn msb_sandbox_lookup(
                 "config_json": h.config_json(),
                 "created_at_unix": h.created_at().map(|t| t.timestamp()),
                 "updated_at_unix": h.updated_at().map(|t| t.timestamp()),
+                "backend_kind": h.backend_kind().as_str(),
             })
             .to_string())
         }))
@@ -2325,8 +2403,13 @@ pub unsafe extern "C" fn msb_sandbox_connect(
         let name = unsafe { cstr(name) }?;
         Ok(Box::pin(async move {
             let sb = Sandbox::get(&name).await?.connect().await?;
+            let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
-            Ok(format!(r#"{{"handle":{handle}}}"#))
+            Ok(serde_json::json!({
+                "handle": handle,
+                "backend_kind": backend_kind,
+            })
+            .to_string())
         }))
     })
 }
@@ -2357,8 +2440,13 @@ pub unsafe extern "C" fn msb_sandbox_start(
             } else {
                 h.start().await.map_err(FfiError::from)?
             };
+            let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
-            Ok(format!(r#"{{"handle":{handle}}}"#))
+            Ok(serde_json::json!({
+                "handle": handle,
+                "backend_kind": backend_kind,
+            })
+            .to_string())
         }))
     })
 }
@@ -2908,10 +2996,11 @@ fn sandbox_handle_json(h: &microsandbox::sandbox::SandboxHandle) -> String {
         None => "null".to_string(),
     };
     format!(
-        r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated}}}"#,
+        r#"{{"name":{name},"status":"{status}","config_json":{config},"created_at_unix":{created},"updated_at_unix":{updated},"backend_kind":"{backend_kind}"}}"#,
         name = name_json,
         status = sandbox_status_str(h.status_snapshot()),
         config = cfg_json,
+        backend_kind = h.backend_kind().as_str(),
     )
 }
 
@@ -4101,8 +4190,11 @@ fn volume_handle_json(vh: &VolumeHandle) -> String {
         .local()
         .map(|local| local.path.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let id = vh.cloud().map(|cloud| cloud.id.as_str());
     serde_json::json!({
+        "id": id,
         "name": vh.name(),
+        "is_default": vh.is_default(),
         "path": path,
         "kind": vh.kind().as_str(),
         "quota_mib": vh.quota_mib(),
@@ -4960,6 +5052,90 @@ pub unsafe extern "C" fn msb_volume_get(
     })
 }
 
+/// Return the cloud account's always-present default volume metadata.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_volume_get_default(
+    cancel_id: u64,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        Ok(Box::pin(async move {
+            let vh = Volume::get_default().await.map_err(FfiError::from)?;
+            Ok(volume_handle_json(&vh))
+        }))
+    })
+}
+
+/// Dispatch a buffered volume filesystem operation for the Go binding.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_volume_fs_op(
+    cancel_id: u64,
+    target: *const c_char,
+    op: *const c_char,
+    args_json: *const c_char,
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run_c(cancel_id, buf, buf_len, || {
+        let target = unsafe { cstr(target) }?;
+        let op = unsafe { cstr(op) }?;
+        let args: serde_json::Value =
+            serde_json::from_str(&unsafe { cstr(args_json) }?).map_err(|error| {
+                FfiError::invalid_argument(format!("invalid volume fs args: {error}"))
+            })?;
+        Ok(Box::pin(async move {
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
+            // Rust handles encode cloud volume UUIDs as `cloud-id:<uuid>`.
+            // Reusing that target here preserves handle identity across a
+            // named volume delete/recreate instead of resolving by name.
+            let backend = default_backend();
+            let fs = VolumeFs::with_backend(backend, &target);
+            match op.as_str() {
+                "read" => {
+                    let data = fs.read(path).await.map_err(FfiError::from)?;
+                    Ok(serde_json::json!({
+                        "data_b64": base64::engine::general_purpose::STANDARD.encode(data)
+                    })
+                    .to_string())
+                }
+                "write" => {
+                    let encoded = args["data_b64"]
+                        .as_str()
+                        .ok_or_else(|| FfiError::invalid_argument("missing volume fs data"))?;
+                    let data = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|error| {
+                            FfiError::invalid_argument(format!("invalid base64 data: {error}"))
+                        })?;
+                    fs.write(path, data).await.map_err(FfiError::from)?;
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "mkdir" => {
+                    fs.mkdir(path).await.map_err(FfiError::from)?;
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "remove" => {
+                    let recursive = args["recursive"].as_bool().unwrap_or(false);
+                    if recursive {
+                        fs.remove_dir(path).await.map_err(FfiError::from)?;
+                    } else {
+                        fs.remove(path).await.map_err(FfiError::from)?;
+                    }
+                    Ok(r#"{"ok":true}"#.into())
+                }
+                "exists" => {
+                    let exists = fs.exists(path).await.map_err(FfiError::from)?;
+                    Ok(serde_json::json!({ "exists": exists }).to_string())
+                }
+                _ => Err(FfiError::invalid_argument("unknown volume fs operation")),
+            }
+        }))
+    })
+}
+
 /// Returns the upstream `microsandbox` crate version this FFI was built against.
 /// Synchronous; no Rust-side state is touched. The Go SDK exposes this so callers
 /// can verify the loaded library matches the expected runtime.
@@ -4968,6 +5144,18 @@ pub unsafe extern "C" fn msb_version(buf: *mut c_uchar, buf_len: usize) -> *mut 
     run(buf, buf_len, || {
         let v = env!("CARGO_PKG_VERSION");
         Ok(format!(r#"{{"version":"{v}"}}"#))
+    })
+}
+
+/// Return secret-safe information about the active default backend.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn msb_default_backend_info(
+    buf: *mut c_uchar,
+    buf_len: usize,
+) -> *mut c_char {
+    run(buf, buf_len, || {
+        serde_json::to_string(&microsandbox::default_backend_info())
+            .map_err(|error| FfiError::internal(format!("serialize backend info: {error}")))
     })
 }
 
@@ -6151,7 +6339,8 @@ pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
 // Attach / AttachShell — interactive PTY sessions
 //
 // These block the calling thread until the guest process exits.
-// opts_json is `{"args":["..."]}` (args is optional).
+// opts_json is `{"args":[...],"cwd":...,"user":...,"env":{...},"detach_keys":...}`
+// (all fields optional).
 // Returns `{"exit_code":<int>}`.
 // ---------------------------------------------------------------------------
 
@@ -6159,6 +6348,11 @@ pub unsafe extern "C" fn msb_agent_free_bytes(ptr: *mut c_uchar, len: usize) {
 struct AttachOpts {
     #[serde(default)]
     args: Vec<String>,
+    cwd: Option<String>,
+    user: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    detach_keys: Option<String>,
 }
 
 /// Attach to a sandbox with an interactive PTY session.
@@ -6185,7 +6379,22 @@ pub unsafe extern "C" fn msb_sandbox_attach(
         };
         let exit_code = rt().block_on(async {
             tokio::select! {
-                r = sb.attach(&cmd_str, opts.args) => r.map_err(FfiError::from),
+                r = sb.attach_with(&cmd_str, |mut b| {
+                    b = b.args(opts.args);
+                    if let Some(cwd) = opts.cwd {
+                        b = b.cwd(cwd);
+                    }
+                    if let Some(user) = opts.user {
+                        b = b.user(user);
+                    }
+                    for (k, v) in opts.env {
+                        b = b.env(k, v);
+                    }
+                    if let Some(keys) = opts.detach_keys {
+                        b = b.detach_keys(keys);
+                    }
+                    b
+                }) => r.map_err(FfiError::from),
                 _ = token.cancelled() => Err(FfiError::new(error_kind::CANCELLED, "cancelled")),
             }
         })?;
@@ -6297,6 +6506,7 @@ mod tests {
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         };
 
         let err = match apply_root_disk(builder, opts) {
@@ -6320,6 +6530,7 @@ mod tests {
             path: None,
             format: None,
             fstype: None,
+            clone: None,
         };
 
         let err = match apply_root_disk(builder, opts) {

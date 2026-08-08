@@ -665,7 +665,7 @@ export declare class RegistryConfigBuilder {
 export type JsRegistryConfigBuilder = RegistryConfigBuilder
 
 /**
- * Fluent builder for the writable rootfs layer (root disk) of an OCI image.
+ * Fluent builder for the root disk of an OCI image.
  *
  * Used inside `ImageBuilder.rootDisk((d) => ...)`:
  *
@@ -673,12 +673,13 @@ export type JsRegistryConfigBuilder = RegistryConfigBuilder
  * .imageWith((i) => i.oci("python:3.12").rootDisk(8192))                       // managed, sized
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.tmpfs().size(512))) // RAM-backed
  * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.disk("./scratch.img").fstype("ext4")))
+ * .imageWith((i) => i.oci("python:3.12").rootDisk((d) => d.flat().size(8192)))
  * ```
  */
 export declare class RootDiskBuilder {
   constructor()
   /**
-   * Size in MiB. Valid for the managed (default) and tmpfs kinds; a
+   * Size in MiB. Valid for the managed (default), tmpfs, and flat kinds; a
    * user-supplied disk image is sized by the image file itself.
    */
   size(mib: number): this
@@ -687,6 +688,8 @@ export declare class RootDiskBuilder {
    * every boot, and the size counts against guest memory.
    */
   tmpfs(): this
+  /** Use a complete flat ext4 OCI rootfs without guest OverlayFS. */
+  flat(): this
   /**
    * Use a user-supplied disk image as the upper, attached writable. The
    * format is derived from the file extension (`.img`/`.raw` → raw,
@@ -699,10 +702,12 @@ export declare class RootDiskBuilder {
    */
   format(format: string): this
   /**
-   * Inner filesystem type of the disk image (e.g. `"ext4"`). Only valid
-   * after `.disk()`.
+   * Inner filesystem type (currently `"ext4"` for flat roots). Valid
+   * after `.disk()` or `.flat()`.
    */
   fstype(fstype: string): this
+  /** Select `"auto"`, `"copy"`, or `"reflink"` private-disk provisioning. */
+  cloneStrategy(strategy: string): this
 }
 export type JsRootDiskBuilder = RootDiskBuilder
 
@@ -859,6 +864,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static remove(name: string): Promise<void>
+  /** Backend retained by this sandbox (`"local"` or `"cloud"`). */
+  get backendKind(): string
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): Promise<string>
   /** Whether this handle owns the sandbox lifecycle (attached mode). */
@@ -991,11 +998,12 @@ export declare class SandboxBuilder {
    * Sugar over `imageWith((i) => i.oci(...).rootDisk(...))` — the root
    * disk lives on the OCI rootfs source, so an OCI image must be set
    * first. Pass a number of MiB for a managed root disk, or a callback
-   * for the tmpfs and disk-image kinds:
+   * for the tmpfs, flat, and disk-image kinds:
    *
    * ```ts
    * .image("python").rootDisk(8192)
    * .image("python").rootDisk((d) => d.tmpfs().size(512))
+   * .image("python").rootDisk((d) => d.flat().size(8192).cloneStrategy("auto"))
    * .image("python").rootDisk((d) => d.disk("./scratch.img"))
    * ```
    */
@@ -1038,6 +1046,11 @@ export declare class SandboxBuilder {
   shell(shell: string): this
   /** In-guest security profile (`"default"` or `"restricted"`). */
   security(profile: string): this
+  /**
+   * Host-runtime deployment profile (`"single-tenant"` or `"multi-tenant"`).
+   * Managed backends may enforce their own profile.
+   */
+  deploymentProfile(profile: string): this
   /** Configure registry connection settings via a callback. */
   registry(configure: (arg: RegistryConfigBuilder) => RegistryConfigBuilder): this
   /**
@@ -1219,6 +1232,8 @@ export declare class SandboxHandle {
   get name(): string
   /** Status at time of query: "running", "stopped", "crashed", or "draining". */
   get status(): string
+  /** Backend retained by this handle (`"local"` or `"cloud"`). */
+  get backendKind(): string
   /** Raw config JSON string from the database. */
   get configJson(): string
   /** Return a fresh handle for the same sandbox. */
@@ -1572,11 +1587,12 @@ export type JsViolationActionBuilder = ViolationActionBuilder
 
 export declare class Volume {
   static get(name: string): Promise<VolumeHandle>
+  static getDefault(): Promise<VolumeHandle>
   static list(): Promise<Array<VolumeInfo>>
   static remove(name: string): Promise<void>
   get name(): string
   get path(): string
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolume = Volume
@@ -1645,6 +1661,7 @@ export type JsVolumeFsWriteSink = VolumeFsWriteSink
 
 export declare class VolumeHandle {
   get name(): string
+  get isDefault(): boolean
   get quotaMib(): number | null
   get kind(): string
   get usedBytes(): number
@@ -1654,7 +1671,7 @@ export declare class VolumeHandle {
   get labels(): Record<string, string>
   get createdAt(): number | null
   remove(): Promise<void>
-  /** Host-side filesystem operations on this volume's directory. */
+  /** Direct filesystem operations through this volume's bound backend. */
   fs(): VolumeFs
 }
 export type JsVolumeHandle = VolumeHandle
@@ -1677,6 +1694,9 @@ export interface AttachOptions {
   detachKeys?: string
   rlimits: Array<JsRlimit>
 }
+
+/** Return secret-safe information about the active default backend. */
+export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
@@ -1838,6 +1858,14 @@ export declare function install(): Promise<void>
 
 /** Check if msb and libkrunfw are installed and available. */
 export declare function isInstalled(): boolean
+
+/** Secret-safe backend diagnostics returned to JavaScript. */
+export interface JsBackendInfo {
+  kind: string
+  apiUrl?: string
+  source: string
+  profile?: string
+}
 
 /** One page returned by `Sandbox.list` / `Sandbox.listWith`. */
 export interface JsSandboxPage {
@@ -2109,7 +2137,7 @@ export interface SandboxMetrics {
 /**
  * Options accepted by `Sandbox.modify()` / `SandboxHandle.modify()`.
  *
- * `memoryMib` / `maxMemoryMib` are in MiB. `policy` is `"no_restart"`
+ * `memoryMib` / `maxMemoryMib` / `rootDiskSizeMib` are in MiB. `policy` is `"no_restart"`
  * (default), `"next_start"`, or `"restart"`. With `dryRun: true` the plan
  * is computed without applying anything.
  */
@@ -2118,6 +2146,7 @@ export interface SandboxModifyOptions {
   maxCpus?: number
   memoryMib?: number
   maxMemoryMib?: number
+  rootDiskSizeMib?: number
   env?: Record<string, string>
   envRemove?: Array<string>
   labels?: Record<string, string>
@@ -2374,6 +2403,7 @@ export interface VolumeConfig {
 /** Volume handle info from the database. */
 export interface VolumeInfo {
   name: string
+  isDefault: boolean
   kind: string
   quotaMib?: number
   usedBytes: number

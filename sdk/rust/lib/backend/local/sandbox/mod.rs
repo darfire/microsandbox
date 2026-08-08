@@ -19,7 +19,8 @@ use microsandbox_db::{DbReadConnection, DbWriteConnection};
 use microsandbox_image::{Digest, GlobalCache};
 use microsandbox_protocol::message::MessageType;
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::Expr,
+    ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
+    sea_query::Expr,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -88,6 +89,7 @@ impl LocalBackend {
         }
 
         let mut config: SandboxConfig = serde_json::from_str(&model.config)?;
+        self.apply_deployment_profile(&mut config);
         config.apply_runtime_defaults();
         self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         validate_hostname(config.spec.runtime.hostname.as_deref())?;

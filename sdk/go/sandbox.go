@@ -3,6 +3,8 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -21,6 +23,9 @@ type Sandbox struct {
 	inner *ffi.Sandbox
 }
 
+// BackendKind returns the backend retained by this sandbox.
+func (s *Sandbox) BackendKind() BackendKind { return BackendKind(s.inner.BackendKind()) }
+
 // CreateSandbox creates and boots a new sandbox. The returned Sandbox owns the
 // VM process — call Close (or Stop + Close) when done.
 //
@@ -34,6 +39,10 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 		opt(&o)
 	}
 
+	if err := resolveRegistryCACertPaths(&o); err != nil {
+		return nil, err
+	}
+
 	ffiOpts := buildFFICreateOptions(o)
 
 	inner, err := ffi.CreateSandbox(ctx, name, ffiOpts)
@@ -43,38 +52,54 @@ func CreateSandbox(ctx context.Context, name string, opts ...SandboxOption) (*Sa
 	return &Sandbox{inner: inner}, nil
 }
 
+// resolveRegistryCACertPaths reads every PEM file named by
+// RegistryCACertPaths and appends its contents to RegistryCACerts. The option
+// functions only record paths, since they cannot report a read failure.
+func resolveRegistryCACertPaths(o *SandboxConfig) error {
+	for _, path := range o.RegistryCACertPaths {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("microsandbox: reading registry CA certs %q: %w", path, err)
+		}
+		o.RegistryCACerts = append(o.RegistryCACerts, pem)
+	}
+	return nil
+}
+
 // buildFFICreateOptions translates SandboxConfig into the FFI wire shape.
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
-		Image:           o.Image,
-		ImageFstype:     o.ImageFstype,
-		ImageBind:       o.ImageBind,
-		Snapshot:        o.Snapshot,
-		MemoryMiB:       o.MemoryMiB,
-		CPUs:            o.CPUs,
-		MaxMemoryMiB:    o.MaxMemoryMiB,
-		MaxCPUs:         o.MaxCPUs,
-		Workdir:         o.Workdir,
-		Shell:           o.Shell,
-		SecurityProfile: string(o.SecurityProfile),
-		Hostname:        o.Hostname,
-		User:            o.User,
-		Replace:         o.Replace,
-		Env:             o.Env,
-		Labels:          o.Labels,
-		Detached:        o.Detached,
-		Ephemeral:       o.Ephemeral,
-		Entrypoint:      o.Entrypoint,
-		LogLevel:        string(o.LogLevel),
-		QuietLogs:       o.QuietLogs,
-		Scripts:         o.Scripts,
-		PullPolicy:      string(o.PullPolicy),
-		MaxDurationSecs: durationSecsCeil(o.MaxDuration),
-		IdleTimeoutSecs: durationSecsCeil(o.IdleTimeout),
-		Ports:           o.Ports,
-		PortsUDP:        o.PortsUDP,
-		PortBindings:    buildFFIPortBindings(o.PortBindings),
+		Image:             o.Image,
+		ImageFstype:       o.ImageFstype,
+		ImageBind:         o.ImageBind,
+		Snapshot:          o.Snapshot,
+		MemoryMiB:         o.MemoryMiB,
+		CPUs:              o.CPUs,
+		MaxMemoryMiB:      o.MaxMemoryMiB,
+		MaxCPUs:           o.MaxCPUs,
+		Workdir:           o.Workdir,
+		Shell:             o.Shell,
+		SecurityProfile:   string(o.SecurityProfile),
+		DeploymentProfile: string(o.DeploymentProfile),
+		Hostname:          o.Hostname,
+		User:              o.User,
+		Replace:           o.Replace,
+		Env:               o.Env,
+		Labels:            o.Labels,
+		Detached:          o.Detached,
+		Ephemeral:         o.Ephemeral,
+		Entrypoint:        o.Entrypoint,
+		LogLevel:          string(o.LogLevel),
+		QuietLogs:         o.QuietLogs,
+		Scripts:           o.Scripts,
+		PullPolicy:        string(o.PullPolicy),
+		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
+		IdleTimeoutSecs:   durationSecsCeil(o.IdleTimeout),
+		Ports:             o.Ports,
+		PortsUDP:          o.PortsUDP,
+		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		RegistryInsecure:  o.RegistryInsecure,
 	}
 	if o.RootDisk != nil {
 		ffiOpts.RootDisk = buildFFIRootDisk(*o.RootDisk)
@@ -104,6 +129,12 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		ffiOpts.RegistryAuth = &ffi.RegistryAuthOptions{
 			Username: o.RegistryAuth.Username,
 			Password: o.RegistryAuth.Password,
+		}
+	}
+	if len(o.RegistryCACerts) > 0 {
+		ffiOpts.RegistryCACerts = make([]string, 0, len(o.RegistryCACerts))
+		for _, pem := range o.RegistryCACerts {
+			ffiOpts.RegistryCACerts = append(ffiOpts.RegistryCACerts, string(pem))
 		}
 	}
 
@@ -176,6 +207,10 @@ func buildFFIRootDisk(rd RootDiskConfig) *ffi.RootDiskSpec {
 		spec.Path = rd.Path
 		spec.Format = rd.Format
 		spec.Fstype = rd.Fstype
+	case RootDiskKindFlat:
+		spec.Kind = "flat"
+		spec.Fstype = rd.Fstype
+		spec.Clone = string(rd.Clone)
 	default:
 		// Managed, including zero-valued configs built without the factory.
 		spec.Kind = "managed"
@@ -543,15 +578,21 @@ type SandboxHandle struct {
 	configJSON    string
 	createdAtUnix *int64
 	updatedAtUnix *int64
+	backendKind   BackendKind
 }
 
 func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
+	backendKind := BackendKind(info.BackendKind)
+	if backendKind == "" {
+		backendKind = BackendUnknown
+	}
 	return &SandboxHandle{
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
 		configJSON:    info.ConfigJSON,
 		createdAtUnix: info.CreatedAtUnix,
 		updatedAtUnix: info.UpdatedAtUnix,
+		backendKind:   backendKind,
 	}
 }
 
@@ -560,6 +601,9 @@ func (h *SandboxHandle) Name() string { return h.name }
 
 // Status returns the sandbox's last-known lifecycle status.
 func (h *SandboxHandle) Status() SandboxStatus { return h.status }
+
+// BackendKind returns the backend retained by this handle.
+func (h *SandboxHandle) BackendKind() BackendKind { return h.backendKind }
 
 // ConfigJSON returns the raw JSON configuration stored for this sandbox.
 func (h *SandboxHandle) ConfigJSON() string { return h.configJSON }
@@ -785,7 +829,25 @@ func (s *Sandbox) OwnsLifecycleOrFalse() bool {
 // The caller's terminal must be a real TTY; this is primarily useful for
 // CLI tools, not library code.
 func (s *Sandbox) Attach(ctx context.Context, cmd string, args ...string) (int, error) {
-	code, err := s.inner.Attach(ctx, cmd, args)
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{Args: args})
+	return code, wrapFFI(err)
+}
+
+// AttachWith starts an interactive PTY session running cmd with args, applying
+// the given options. Otherwise identical to Attach.
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error) {
+	o := AttachConfig{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	code, err := s.inner.Attach(ctx, cmd, ffi.AttachOptions{
+		Args:       args,
+		Cwd:        o.Cwd,
+		User:       o.User,
+		Env:        o.Env,
+		DetachKeys: o.DetachKeys,
+	})
 	return code, wrapFFI(err)
 }
 

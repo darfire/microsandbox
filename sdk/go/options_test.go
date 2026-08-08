@@ -62,6 +62,21 @@ func TestWithRootDiskDiskImage(t *testing.T) {
 	}
 }
 
+func TestWithRootDiskFlat(t *testing.T) {
+	o := SandboxConfig{}
+	WithRootDisk(RootDisk.Flat(RootDiskFlatOptions{
+		SizeMiB: 8192,
+		Fstype:  "ext4",
+		Clone:   FlatCloneReflink,
+	}))(&o)
+	if o.RootDisk == nil || o.RootDisk.Kind() != RootDiskKindFlat {
+		t.Fatalf("RootDisk = %#v, want flat config", o.RootDisk)
+	}
+	if o.RootDisk.SizeMiB != 8192 || o.RootDisk.Fstype != "ext4" || o.RootDisk.Clone != FlatCloneReflink {
+		t.Errorf("flat fields = %#v", o.RootDisk)
+	}
+}
+
 func TestWithOCIUpperSizeIsManagedRootDiskAlias(t *testing.T) {
 	o := SandboxConfig{}
 	WithOCIUpperSize(8192)(&o)
@@ -190,6 +205,44 @@ func TestWithExecTTY(t *testing.T) {
 	WithExecTTY(false)(&o)
 	if o.TTY {
 		t.Fatal("TTY should be disabled")
+	}
+}
+
+func TestWithAttachUser(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachUser("dev")(&o)
+	if o.User != "dev" {
+		t.Errorf("got %q, want %q", o.User, "dev")
+	}
+}
+
+func TestWithAttachCwd(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachCwd("/app")(&o)
+	if o.Cwd != "/app" {
+		t.Errorf("got %q, want %q", o.Cwd, "/app")
+	}
+}
+
+func TestWithAttachDetachKeys(t *testing.T) {
+	o := AttachConfig{}
+	WithAttachDetachKeys("ctrl-q")(&o)
+	if o.DetachKeys != "ctrl-q" {
+		t.Errorf("got %q, want %q", o.DetachKeys, "ctrl-q")
+	}
+}
+
+func TestWithAttachEnvMerges(t *testing.T) {
+	o := AttachConfig{}
+	if o.Env != nil {
+		t.Fatal("Env should start nil")
+	}
+	WithAttachEnv(map[string]string{"A": "1", "B": "2"})(&o)
+	WithAttachEnv(map[string]string{"B": "overwritten", "C": "3"})(&o)
+
+	want := map[string]string{"A": "1", "B": "overwritten", "C": "3"}
+	if !reflect.DeepEqual(o.Env, want) {
+		t.Errorf("got %v, want %v", o.Env, want)
 	}
 }
 
@@ -737,6 +790,46 @@ func TestWithRegistryAuth(t *testing.T) {
 	WithRegistryAuth(RegistryAuth{Username: "u", Password: "p"})(&o)
 	if o.RegistryAuth == nil || o.RegistryAuth.Username != "u" || o.RegistryAuth.Password != "p" {
 		t.Errorf("RegistryAuth: got %+v", o.RegistryAuth)
+	}
+}
+
+func TestWithRegistryInsecure(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryInsecure()(&o)
+	if !o.RegistryInsecure {
+		t.Error("RegistryInsecure: got false")
+	}
+}
+
+func TestWithRegistryCACerts(t *testing.T) {
+	o := SandboxConfig{}
+	first := []byte("-----BEGIN CERTIFICATE-----\nfirst\n")
+	WithRegistryCACerts(first)(&o)
+	WithRegistryCACerts([]byte("-----BEGIN CERTIFICATE-----\nsecond\n"))(&o)
+	if len(o.RegistryCACerts) != 2 {
+		t.Fatalf("RegistryCACerts: got %d bundles, want 2", len(o.RegistryCACerts))
+	}
+	if string(o.RegistryCACerts[0]) != "-----BEGIN CERTIFICATE-----\nfirst\n" {
+		t.Errorf("RegistryCACerts[0]: got %q", o.RegistryCACerts[0])
+	}
+	if string(o.RegistryCACerts[1]) != "-----BEGIN CERTIFICATE-----\nsecond\n" {
+		t.Errorf("RegistryCACerts[1]: got %q", o.RegistryCACerts[1])
+	}
+	// The option copies its input, so later caller mutations do not leak in.
+	first[0] = 'X'
+	if o.RegistryCACerts[0][0] != '-' {
+		t.Errorf("RegistryCACerts[0] aliases the caller's slice: got %q", o.RegistryCACerts[0])
+	}
+}
+
+func TestWithRegistryCACertsPath(t *testing.T) {
+	o := SandboxConfig{}
+	WithRegistryCACertsPath("/etc/ca/one.pem")(&o)
+	WithRegistryCACertsPath("/etc/ca/two.pem")(&o)
+	if len(o.RegistryCACertPaths) != 2 ||
+		o.RegistryCACertPaths[0] != "/etc/ca/one.pem" ||
+		o.RegistryCACertPaths[1] != "/etc/ca/two.pem" {
+		t.Errorf("RegistryCACertPaths: got %v", o.RegistryCACertPaths)
 	}
 }
 

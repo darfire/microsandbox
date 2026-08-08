@@ -9,6 +9,8 @@ use crate::ui;
 //--------------------------------------------------------------------------------------------------
 
 pub mod common;
+pub mod completion;
+pub mod context;
 pub mod copy;
 pub mod create;
 pub mod exec;
@@ -80,7 +82,15 @@ pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbo
             if let Ok(config) = handle.config()
                 && let RootfsSource::Oci(ref oci) = config.spec.image
             {
-                image::pull_if_missing(&oci.reference, quiet).await?;
+                let materialization = if matches!(
+                    &oci.root_disk,
+                    Some(microsandbox::sandbox::RootDisk::Flat { .. })
+                ) {
+                    pull::PullMaterialization::Flat
+                } else {
+                    pull::PullMaterialization::Layered
+                };
+                image::pull_if_missing(&oci.reference, quiet, materialization).await?;
             }
 
             let spinner = if quiet {

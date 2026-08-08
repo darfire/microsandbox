@@ -9,7 +9,10 @@ use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig};
 use zeroize::Zeroizing;
 
-use crate::config::{DnsConfig, InterfaceOverrides, NetworkConfig, PortProtocol, PublishedPort};
+use crate::config::{
+    DnsConfig, InterfaceOverrides, MAX_NETWORK_CONNECTIONS, NetworkConfig, PortProtocol,
+    PublishedPort,
+};
 use crate::dns::Nameserver;
 use crate::policy::{BuildError, NetworkPolicy};
 use crate::secrets::config::{
@@ -210,7 +213,14 @@ impl NetworkBuilder {
 
     /// Set the maximum number of concurrent connections.
     pub fn max_connections(mut self, max: usize) -> Self {
-        self.config.max_connections = Some(max);
+        if max > MAX_NETWORK_CONNECTIONS {
+            self.errors.push(BuildError::MaxConnectionsExceeded {
+                configured: max,
+                limit: MAX_NETWORK_CONNECTIONS,
+            });
+        } else {
+            self.config.max_connections = Some(max);
+        }
         self
     }
 
@@ -266,6 +276,20 @@ impl NetworkBuilder {
     pub fn build(mut self) -> Result<NetworkConfig, BuildError> {
         if let Some(err) = self.errors.drain(..).next() {
             return Err(err);
+        }
+        if let Some(max) = self.config.max_connections
+            && max > MAX_NETWORK_CONNECTIONS
+        {
+            return Err(BuildError::MaxConnectionsExceeded {
+                configured: max,
+                limit: MAX_NETWORK_CONNECTIONS,
+            });
+        }
+        if self.config.tls.enabled
+            && (self.config.tls.intercept_ca.cert_path.is_some()
+                != self.config.tls.intercept_ca.key_path.is_some())
+        {
+            return Err(BuildError::IncompleteInterceptCaConfig);
         }
         self.config.secrets.validate()?;
         Ok(self.config)
@@ -679,6 +703,32 @@ mod tests {
             .build()
             .unwrap();
         assert!(!cfg.dns.rebind_protection);
+    }
+
+    #[test]
+    fn network_builder_rejects_excessive_max_connections() {
+        let err = NetworkBuilder::new()
+            .max_connections(MAX_NETWORK_CONNECTIONS + 1)
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BuildError::MaxConnectionsExceeded {
+                configured,
+                limit: MAX_NETWORK_CONNECTIONS
+            } if configured == MAX_NETWORK_CONNECTIONS + 1
+        ));
+    }
+
+    #[test]
+    fn network_builder_rejects_incomplete_intercept_ca_config() {
+        let err = NetworkBuilder::new()
+            .tls(|t| t.intercept_ca_cert("/tmp/ca.crt"))
+            .build()
+            .unwrap_err();
+
+        assert!(matches!(err, BuildError::IncompleteInterceptCaConfig));
     }
 
     #[test]

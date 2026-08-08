@@ -369,10 +369,11 @@ async fn tcp_proxy_task(
     //
     // guest → server: receive from channel, write to server socket.
     // server → guest: read from server socket, send via channel + wake poll.
+    let mut guest_eof = false;
     loop {
         tokio::select! {
             // Guest → server: substitute placeholders before forwarding.
-            data = from_smoltcp.recv() => {
+            data = from_smoltcp.recv(), if !guest_eof => {
                 match data {
                     Some(bytes) => {
                         if let Some(tls_state) = late_connect_state.take()
@@ -426,8 +427,16 @@ async fn tcp_proxy_task(
                             }
                         }
                     }
-                    // Channel closed — smoltcp socket was closed by guest.
-                    None => break,
+                    // Channel closed — the guest half-closed (FIN) or the
+                    // connection was torn down. Propagate the half-close:
+                    // stop sending upstream but keep relaying server →
+                    // guest until the server closes.
+                    None => {
+                        guest_eof = true;
+                        if server_tx.shutdown().await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -597,15 +606,23 @@ async fn relay_connected_stream(
     let (mut server_rx, mut server_tx) = stream.into_split();
     let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
 
+    let mut guest_eof = false;
     loop {
         tokio::select! {
-            data = from_smoltcp.recv() => {
+            data = from_smoltcp.recv(), if !guest_eof => {
                 match data {
                     Some(bytes) => {
                         server_tx.write_all(&bytes).await?;
                         server_tx.flush().await?;
                     }
-                    None => break,
+                    // Guest half-closed (FIN): stop sending upstream but
+                    // keep relaying server → guest until the server closes.
+                    None => {
+                        guest_eof = true;
+                        if server_tx.shutdown().await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             result = server_rx.read(&mut server_buf) => {
@@ -1157,10 +1174,13 @@ mod tests {
         let (to_tx, mut to_rx) = mpsc::channel(1);
         drop(from_tx);
 
-        let tls_state = Arc::new(TlsState::new(
-            microsandbox_types::TlsConfig::default(),
-            crate::secrets::handle::SecretsHandle::new(SecretsConfig::default()),
-        ));
+        let tls_state = Arc::new(
+            TlsState::new(
+                microsandbox_types::TlsConfig::default(),
+                crate::secrets::handle::SecretsHandle::new(SecretsConfig::default()),
+            )
+            .unwrap(),
+        );
         let proxy_connect = Arc::new(ProxyConnectState::new());
 
         handle_connect_tunnel(

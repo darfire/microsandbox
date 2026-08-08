@@ -650,15 +650,19 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
     Env:    map[string]string{"MODE": "prod"},
     Policy: m.ModificationPolicyRestart,
 })
+
+// Grow the managed OCI root disk offline and restart
+_, err = sb.Modify(ctx, m.ModifyOptions{
+    RootDiskSizeMiB: 8192,
+    Policy:          m.ModificationPolicyRestart,
+})
 ```
 
 </Accordion>
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`, and apply is all-or-nothing.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
-
-Secret changes are Rust-SDK and CLI only for now. The CLI equivalent is [`msb modify`](/cli/sandbox-commands#msb-modify).
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` changes are offline: managed and flat OCI root disks grow only, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -770,6 +774,53 @@ Bridge the caller's terminal to a process inside the sandbox for a fully interac
   <div className="msb-param">
     <div className="msb-param-key"><code>args</code><span className="msb-type">...string</span></div>
     <div className="msb-param-desc">Command arguments.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">int</span></div>
+    <div className="msb-param-desc">Exit code of the process.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">AttachWith()</span>
+
+```go
+func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opts ...AttachOption) (int, error)
+```
+
+<Accordion title="Example">
+
+```go
+exitCode, err := sb.AttachWith(ctx, "bash", []string{"-l"},
+    m.WithAttachUser("dev"),
+    m.WithAttachCwd("/app"),
+    m.WithAttachEnv(map[string]string{"DEBUG": "1"}),
+    m.WithAttachDetachKeys("ctrl-q"),
+)
+```
+
+</Accordion>
+
+Same as [`Attach`](#sb-attach), but takes [`AttachOption`](#attachoption) values so the session can run as a different guest user, in a different working directory, with extra environment variables, or with custom detach keys.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cmd</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Command to run.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>args</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Command arguments; may be <code>nil</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#attachoption">...AttachOption</a></div>
+    <div className="msb-param-desc">Attach options.</div>
   </div>
 </div>
 
@@ -1457,6 +1508,48 @@ Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#r
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
+
+```go
+func WithRegistryInsecure() SandboxOption
+```
+
+Use plain HTTP for the registry instead of HTTPS, for local or self-hosted registries served without TLS such as `localhost:5050/my-app:latest`. The cloud backend rejects this override.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACerts()</span>
+
+```go
+func WithRegistryCACerts(pem []byte) SandboxOption
+```
+
+Trust additional PEM-encoded CA certificates when pulling, for registries served with a private certificate authority. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>pem</code><span className="msb-type">[]byte</span></div>
+    <div className="msb-param-desc">PEM-encoded CA certificates.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryCACertsPath()</span>
+
+```go
+func WithRegistryCACertsPath(path string) SandboxOption
+```
+
+Like [`WithRegistryCACerts`](#withregistrycacerts) but reads the PEM bundle from a file. The file is read when [`CreateSandbox`](#m-createsandbox) runs, which fails if it is unreadable. Called repeatedly, the bundles accumulate. The cloud backend rejects this override.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Path to a PEM file.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithPorts()</span>
 
 ```go
@@ -1962,7 +2055,7 @@ Explicit idle-refresh result.
 
 <p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
 
-A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU or memory size). Secret changes are Rust-SDK and CLI only for now.
+A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU, memory, or disk size).
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1970,6 +2063,7 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | MaxCPUs | `uint8` | Boot-time maximum possible vCPUs (restart-backed) |
 | MemoryMiB | `uint32` | Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB` |
 | MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
+| RootDiskSizeMiB | `uint32` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
 | Env | `map[string]string` | Environment variables to set for future execs |
 | EnvRemove | `[]string` | Environment variable keys to remove |
 | Labels | `map[string]string` | Labels to set |
@@ -2092,6 +2186,97 @@ type SandboxOption func(*SandboxConfig)
 ```
 
 A functional option for [`CreateSandbox`](#m-createsandbox). Every `WithX` helper in the [Options](#options) section returns one. The lifecycle setters [`WithStopTimeout`](#withstoptimeout) and [`WithKillTimeout`](#withkilltimeout) return distinct `StopOption` / `KillOption` types passed to [`Stop`](#sb-stop) and [`Kill`](#sb-kill) instead.
+
+### AttachConfig
+
+<p className="msb-backref">Populated by <a href="#attachoption">AttachOption</a></p>
+
+Configures a single [`AttachWith`](#sb-attachwith) call. Most callers set fields through the `WithAttach*` functional options; `AttachConfig` is exported for parity with the other SDKs' config types.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Cwd` | `string` | Working directory inside the guest; defaults to the sandbox workdir |
+| `User` | `string` | Guest user (UID or name, optionally `user:group`); defaults to the sandbox user |
+| `Env` | `map[string]string` | Environment variables merged on top of the sandbox env |
+| `DetachKeys` | `string` | Detach key sequence; defaults to `ctrl-]` |
+
+### AttachOption
+
+<p className="msb-backref">Accepted by <a href="#sb-attachwith">sb.AttachWith()</a></p>
+
+```go
+type AttachOption func(*AttachConfig)
+```
+
+A functional option that mutates an [`AttachConfig`](#attachconfig). Construct them with the `WithAttach*` functions below.
+
+#### <span className="msb-hn">WithAttachCwd()</span>
+
+```go
+func WithAttachCwd(path string) AttachOption
+```
+
+Set the working directory for the attached session. Defaults to the sandbox's workdir.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Absolute path inside the guest.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachUser()</span>
+
+```go
+func WithAttachUser(user string) AttachOption
+```
+
+Run the attached session as the given guest user instead of the sandbox's default user (set via [`WithUser`](#withuser)).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>user</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Guest user as a UID or name, optionally <code>user:group</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachEnv()</span>
+
+```go
+func WithAttachEnv(env map[string]string) AttachOption
+```
+
+Add environment variables for the attached session, merged on top of the sandbox's env. Called repeatedly, maps merge; later keys overwrite earlier ones.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">map[string]string</span></div>
+    <div className="msb-param-desc">Environment variables to set.</div>
+  </div>
+</div>
+
+#### <span className="msb-hn">WithAttachDetachKeys()</span>
+
+```go
+func WithAttachDetachKeys(keys string) AttachOption
+```
+
+Set the key sequence that detaches from the session without stopping it. Uses Docker-style syntax: `ctrl-]` (the default), `ctrl-p,ctrl-q`, or a single character like `q`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>keys</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Detach key sequence.</div>
+  </div>
+</div>
 
 ### Metrics
 
