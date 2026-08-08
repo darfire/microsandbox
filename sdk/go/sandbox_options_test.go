@@ -582,10 +582,10 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
-			IPv4Pool:         "172.31.240.0/24",
-			IPv6Pool:         "fd7a:115c:a1e0:100::/56",
-			TransparentProxy: "127.0.0.1:1080",
+			IPv4Pool: "172.31.240.0/24",
+			IPv6Pool: "fd7a:115c:a1e0:100::/56",
 		}),
+		WithProxy(SOCKS5Proxy("127.0.0.1:1080")),
 	)
 	net := mustField(t, got, "network").(map[string]any)
 
@@ -618,8 +618,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	if len(ns) != 1 || ns[0] != "1.1.1.1:53" {
 		t.Fatalf("dns.nameservers = %v", ns)
 	}
-	if net["transparent_proxy"] != "127.0.0.1:1080" {
-		t.Fatalf("transparent_proxy = %v", net["transparent_proxy"])
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks5" || proxy["address"] != "127.0.0.1:1080" {
+		t.Fatalf("proxy = %#v", proxy)
 	}
 }
 
@@ -632,7 +633,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 	for _, key := range []string{
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
 		"hostname", "user", "replace", "detached", "env", "scripts",
-		"ports", "ports_udp", "network", "secrets", "patches", "volumes",
+		"ports", "ports_udp", "network", "proxy", "secrets", "patches", "volumes",
 		"init", "registry_auth", "root_disk",
 	} {
 		if _, present := got[key]; present {

@@ -17,6 +17,7 @@ export {
   withDefaultBackend,
 } from "./runtime.js";
 export type { DefaultBackend } from "./runtime.js";
+export type { OutboundProxy } from "./network-config.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
@@ -351,6 +352,8 @@ export const DnsBuilder = napi.DnsBuilder;
 export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;
+export const OutboundProxyBuilder = napi.OutboundProxyBuilder;
+export const Socks5ProxyBuilder = napi.Socks5ProxyBuilder;
 export const MountBuilder = napi.MountBuilder;
 export const PatchBuilder = napi.PatchBuilder;
 export const RegistryConfigBuilder = napi.RegistryConfigBuilder;
@@ -362,10 +365,14 @@ export const InitOptionsBuilder = napi.InitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,
+  NapiOutboundProxyBuilder,
   NapiRootDiskBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
+  NapiSocks5ProxyBuilder,
 } from "./internal/napi.js";
+export type OutboundProxyBuilder = NapiOutboundProxyBuilder;
+export type Socks5ProxyBuilder = NapiSocks5ProxyBuilder;
 export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
 export type NetworkPolicyBuilder = NapiNetworkPolicyBuilder;
 export const RuleBuilder = napi.RuleBuilder;

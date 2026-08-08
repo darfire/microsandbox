@@ -60,6 +60,7 @@ type SandboxConfig struct {
 	PortsUDP           map[uint16]uint16 // host port → guest port (UDP)
 	PortBindings       []PortBinding     // explicit bind address host→guest ports
 	Network            *NetworkConfig
+	Proxy              *OutboundProxy
 	Secrets            []SecretEntry
 	Patches            []PatchConfig
 	Volumes            map[string]MountConfig // guest path → mount config
@@ -743,6 +744,11 @@ func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
 }
 
+// WithProxy sets the single proxy used for outbound sandbox connections.
+func WithProxy(proxy *OutboundProxy) SandboxOption {
+	return func(o *SandboxConfig) { o.Proxy = proxy }
+}
+
 // WithSecrets appends credential secrets to the sandbox. Secrets never enter
 // the VM; the network proxy substitutes them at the transport layer.
 func WithSecrets(secrets ...SecretEntry) SandboxOption {
@@ -804,6 +810,18 @@ type RegistryAuth struct {
 // Network
 // ---------------------------------------------------------------------------
 
+// OutboundProxy configures the single proxy used for outbound connections.
+// Construct one with a protocol-specific function such as SOCKS5Proxy.
+type OutboundProxy struct {
+	protocol string
+	address  string
+}
+
+// SOCKS5Proxy configures a SOCKS5 outbound proxy at address.
+func SOCKS5Proxy(address string) *OutboundProxy {
+	return &OutboundProxy{protocol: "socks5", address: address}
+}
+
 // NetworkConfig configures the sandbox network stack.
 type NetworkConfig struct {
 	// Rules are custom ordered allow/deny rules (first match wins). Use
@@ -857,14 +875,6 @@ type NetworkConfig struct {
 
 	// TrustHostCAs ships the host's extra CA bundles into the guest.
 	TrustHostCAs *bool
-
-	// TransparentProxy is a SOCKS5 proxy ("host:port") that all outbound
-	// sandbox connections are dialed through, in place of connecting to the
-	// real destination directly. Applies uniformly to TLS-intercepted and
-	// bypassed/plain TCP traffic alike. Useful for pointing a sandbox's
-	// entire egress at an external inspection proxy (e.g. mitmproxy in
-	// `--mode socks5`) without the guest needing to know a proxy exists.
-	TransparentProxy string
 }
 
 // DNSConfig configures the in-VM DNS proxy.

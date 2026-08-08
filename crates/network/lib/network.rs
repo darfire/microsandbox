@@ -199,7 +199,7 @@ impl SmoltcpNetwork {
         let published_ports = self.config.ports.clone();
         let max_connections = self.config.max_connections;
         let secrets = self.secrets.clone();
-        let transparent_proxy = self.config.transparent_proxy;
+        let outbound_proxy = self.config.outbound_proxy.clone().map(Arc::new);
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -215,7 +215,7 @@ impl SmoltcpNetwork {
                         max_connections,
                         tokio_handle,
                         secrets,
-                        transparent_proxy,
+                        outbound_proxy,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),

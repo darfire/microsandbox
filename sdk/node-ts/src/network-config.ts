@@ -61,6 +61,12 @@ export interface SecretEntry {
   readonly injection: SecretInjection;
 }
 
+/** Proxy used for outbound sandbox connections. */
+export type OutboundProxy = {
+  readonly protocol: "socks5";
+  readonly address: string;
+};
+
 /** Built network configuration produced by `NetworkBuilder.build()`. */
 export interface NetworkConfig {
   readonly enabled: boolean;
@@ -80,8 +86,6 @@ export interface NetworkConfig {
     readonly mtu?: number | null;
   };
   readonly trustHostCAs: boolean;
-  /** SOCKS5 proxy (`host:port`) all outbound sandbox connections dial
-   * through, in place of connecting to the real destination directly.
-   * `null` when unset. */
-  readonly transparentProxy: string | null;
+  /** Canonical proxy configuration for outbound connections. */
+  readonly outboundProxy: OutboundProxy | null;
 }

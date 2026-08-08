@@ -85,6 +85,13 @@ pub enum BuildError {
     #[error("invalid IPv6 pool `{raw}`: prefix must be /64 or shorter")]
     InvalidIpv6Pool { raw: String },
 
+    /// An outbound proxy builder received an invalid configuration.
+    #[error("invalid outbound proxy: {reason}")]
+    InvalidOutboundProxy {
+        /// Protocol-specific builder error.
+        reason: String,
+    },
+
     /// `.domain(&str)` or `.domain_suffix(&str)` received a value that
     /// doesn't parse as a [`DomainName`].
     #[error("rule #{rule_index}: invalid domain `{raw}`: {source}")]

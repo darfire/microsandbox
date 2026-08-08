@@ -1,0 +1,34 @@
+---
+title: Proxies
+description: Python SDK - Proxy API reference
+---
+
+Configure one proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive; currently only SOCKS5 is supported.
+
+See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
+
+## Typical flow
+
+```python
+from microsandbox import OutboundProxy, Sandbox
+
+sandbox = await Sandbox.create(
+    "worker",
+    image="python",
+    proxy=OutboundProxy.socks5("127.0.0.1:1080"),
+)
+```
+
+## Sandbox.create()
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| proxy | [`OutboundProxy`](#outboundproxy)` \| None` | `None` | Single proxy used for outbound sandbox connections |
+
+## OutboundProxy
+
+Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
+
+| Class method | Returns | Description |
+|--------------|---------|-------------|
+| `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |

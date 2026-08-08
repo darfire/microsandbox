@@ -39,6 +39,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "patches",
     "ports",
     "network",
+    "proxy",
     "secrets",
     "on_secret_violation",
     "detached",
@@ -396,6 +397,23 @@ pub fn sandbox_builder_from_args(
     if let Some(network) = kwargs.get_item("network")? {
         let net_dict = as_dict(&network)?;
         builder = apply_network(builder, &net_dict)?;
+    }
+
+    // Outbound proxy.
+    if let Some(proxy) = kwargs.get_item("proxy")?
+        && !proxy.is_none()
+    {
+        let proxy = as_dict(&proxy)?;
+        let protocol = extract_required::<String>(&proxy, "protocol")?;
+        let address = extract_required::<String>(&proxy, "address")?;
+        builder = match protocol.as_str() {
+            "socks5" => builder.proxy(move |p| p.socks5(address)),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported outbound proxy protocol {protocol:?}"
+                )));
+            }
+        };
     }
 
     // Secrets.
@@ -1105,16 +1123,6 @@ fn apply_network(
     // Host-CA trust (ship host's extra CAs into the guest at boot).
     if let Some(trust) = extract_opt::<bool>(net, "trust_host_cas")? {
         builder = builder.network(move |n| n.trust_host_cas(trust));
-    }
-
-    // SOCKS5 proxy that all outbound sandbox connections dial through.
-    if let Some(raw) = extract_opt::<String>(net, "transparent_proxy")? {
-        let proxy_addr: std::net::SocketAddr = raw.parse().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid transparent_proxy {raw:?}: {e}"
-            ))
-        })?;
-        builder = builder.network(move |n| n.transparent_proxy(proxy_addr));
     }
 
     // Secret violation action (sandbox-level, not per-secret).

@@ -508,13 +508,6 @@ export declare class NetworkBuilder {
   /** Trust the host's root CAs inside the guest. Default: false. */
   trustHostCAs(enabled: boolean): this
   /**
-   * Dial all outbound sandbox connections through this SOCKS5 proxy
-   * (`host:port`) instead of connecting to the real destination
-   * directly. Applies uniformly to TLS-intercepted and bypassed/plain
-   * TCP traffic.
-   */
-  transparentProxy(addr: string): this
-  /**
    * Snapshot the accumulated configuration as a JSON string. The TS
    * layer parses + key-remaps to camelCase before returning to the
    * caller.
@@ -565,6 +558,14 @@ export declare class NetworkPolicyBuilder {
   build(): NetworkPolicy
 }
 export type JsNetworkPolicyBuilder = NetworkPolicyBuilder
+
+/** Selects the protocol for an outbound proxy. */
+export declare class OutboundProxyBuilder {
+  constructor()
+  /** Select a SOCKS5 proxy at `address`. */
+  socks5(address: string): Socks5ProxyBuilder
+}
+export type JsOutboundProxyBuilder = OutboundProxyBuilder
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -1094,6 +1095,8 @@ export declare class SandboxBuilder {
   disableNetwork(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
+  /** Configure the single proxy used for outbound sandbox connections. */
+  proxy(configure: (arg: OutboundProxyBuilder) => Socks5ProxyBuilder): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */
@@ -1485,6 +1488,12 @@ export declare class SnapshotHandle {
   remove(opts?: SnapshotRemoveOptions | undefined | null): Promise<void>
 }
 export type JsSnapshotHandle = SnapshotHandle
+
+/** Builds a SOCKS5 outbound proxy. */
+export declare class Socks5ProxyBuilder {
+
+}
+export type JsSocks5ProxyBuilder = Socks5ProxyBuilder
 
 /** Native in-process SSH client session. */
 export declare class SshClient {
@@ -2200,8 +2209,8 @@ export interface SecretModifySpec {
 /**
  * Set the process-wide default backend.
  *
- * `kind="local"` selects the local backend. `kind="cloud"` requires either
- * `url` + `api_key`, or `profile`.
+ * `kind="local"` selects the local backend. `kind="cloud"` requires either an
+ * API key (with an optional URL override), or a profile.
  */
 export declare function setDefaultBackend(kind: string, url?: string | undefined | null, apiKey?: string | undefined | null, profile?: string | undefined | null): void
 

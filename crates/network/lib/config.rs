@@ -3,16 +3,16 @@
 //! These types represent the user-facing declarative network configuration
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use microsandbox_types::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
-
+use crate::outbound_proxy::OutboundProxy;
 use crate::policy::NetworkPolicy;
 use crate::secrets::config::SecretsConfig;
-use microsandbox_types::TlsConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -67,12 +67,12 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub trust_host_cas: bool,
 
-    /// SOCKS5 proxy that all outbound sandbox connections are dialed
-    /// through, in place of connecting to the real destination directly.
-    /// Applies to both TLS-intercepted and bypassed/plain TCP traffic,
-    /// since both funnel through [`crate::proxy::connect_upstream`].
+    /// Proxy that all outbound sandbox connections are dialed through.
+    ///
+    /// Applies to both TLS-intercepted and bypassed/plain TCP traffic, since
+    /// both use the same upstream connection path.
     #[serde(default)]
-    pub transparent_proxy: Option<SocketAddr>,
+    pub outbound_proxy: Option<OutboundProxy>,
 }
 
 /// Optional overrides for the guest interface.
@@ -173,7 +173,7 @@ impl Default for NetworkConfig {
             secrets: SecretsConfig::default(),
             max_connections: None,
             trust_host_cas: false,
-            transparent_proxy: None,
+            outbound_proxy: None,
         }
     }
 }
@@ -212,6 +212,7 @@ fn default_query_timeout_ms() -> u64 {
 mod tests {
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
     use crate::dns::Nameserver;
+    use crate::outbound_proxy::OutboundProxy;
     use crate::policy::{Destination, NetworkPolicy, Rule};
 
     /// The engine's `policy`/`dns`/`interface` subdocuments must remain
@@ -285,39 +286,50 @@ mod tests {
         );
     }
 
-    /// `transparent_proxy` round-trips whole-config through the wire type the
+    /// `outbound_proxy` round-trips whole-config through the wire type the
     /// same way `network_config_from_spec`/`network_spec_from_config`
     /// (`sdk/rust/lib/sandbox/config.rs`) do in production: a full
     /// `NetworkConfig` -> JSON -> `NetworkSpec` -> JSON -> `NetworkConfig`
     /// hop, not just the field in isolation.
     #[test]
-    fn transparent_proxy_round_trips_through_wire_network_spec() {
+    fn outbound_proxy_round_trips_through_wire_network_spec() {
         let mut config = NetworkConfig::default();
-        config.transparent_proxy = Some("127.0.0.1:1080".parse().unwrap());
+        config.outbound_proxy = Some(OutboundProxy::Socks5("127.0.0.1:1080".parse().unwrap()));
 
         let config_json = serde_json::to_value(&config).unwrap();
         let wire: microsandbox_types::NetworkSpec =
             serde_json::from_value(config_json.clone()).unwrap();
-        assert_eq!(wire.transparent_proxy.as_deref(), Some("127.0.0.1:1080"));
+        let wire_proxy = wire.outbound_proxy.as_ref().unwrap();
+        assert_eq!(
+            wire_proxy,
+            &microsandbox_types::OutboundProxy::Socks5("127.0.0.1:1080".to_string())
+        );
+        assert_eq!(
+            serde_json::to_value(wire_proxy).unwrap(),
+            serde_json::json!({
+                "protocol": "socks5",
+                "address": "127.0.0.1:1080",
+            })
+        );
 
         let round_tripped: NetworkConfig =
             serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
-        assert_eq!(round_tripped.transparent_proxy, config.transparent_proxy);
+        assert_eq!(round_tripped.outbound_proxy, config.outbound_proxy);
     }
 
     #[test]
-    fn transparent_proxy_omitted_when_unset() {
+    fn outbound_proxy_omitted_when_unset() {
         let config = NetworkConfig::default();
         let wire: microsandbox_types::NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
-        assert_eq!(wire.transparent_proxy, None);
+        assert_eq!(wire.outbound_proxy, None);
         assert!(
             !serde_json::to_value(&wire)
                 .unwrap()
                 .as_object()
                 .unwrap()
-                .contains_key("transparent_proxy"),
-            "skip_serializing_if should omit an unset transparent_proxy from the wire form"
+                .contains_key("outbound_proxy"),
+            "skip_serializing_if should omit an unset outbound_proxy from the wire form"
         );
     }
 

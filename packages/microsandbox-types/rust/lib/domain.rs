@@ -510,15 +510,22 @@ pub struct NetworkSpec {
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
 
-    /// SOCKS5 proxy (`host:port`) that all outbound sandbox connections are
-    /// dialed through, in place of connecting to the real destination
-    /// directly. Applies uniformly to TLS-intercepted and bypassed/plain TCP
-    /// traffic alike, since both paths funnel through the same host-side
-    /// dial. Useful for pointing an entire sandbox's egress at an external
-    /// inspection proxy (e.g. mitmproxy in `--mode socks5`) without the
-    /// guest needing to know a proxy exists.
+    /// Proxy that all outbound sandbox connections are dialed through.
+    ///
+    /// Currently only SOCKS5 is supported.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub transparent_proxy: Option<String>,
+    pub outbound_proxy: Option<OutboundProxy>,
+}
+
+/// Proxy configuration for outbound sandbox connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "protocol", content = "address", rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OutboundProxy {
+    /// A SOCKS5 proxy at the given `IP:port` address.
+    Socks5(String),
 }
 
 /// A published port mapping between host and guest.
@@ -1236,7 +1243,7 @@ impl Default for NetworkSpec {
             secrets: None,
             max_connections: None,
             trust_host_cas: false,
-            transparent_proxy: None,
+            outbound_proxy: None,
         }
     }
 }

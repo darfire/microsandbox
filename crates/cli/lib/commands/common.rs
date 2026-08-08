@@ -1,16 +1,15 @@
 //! Common sandbox configuration flags shared between commands.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
-use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
     DiskImageFormat, MountBuilder, Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle,
     SecurityProfile,
 };
+use microsandbox::{OutboundProxy, VolumeKind};
 
 use crate::ui;
 
@@ -360,15 +359,11 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub trust_host_cas: bool,
 
-    /// Dial all outbound sandbox connections through this SOCKS5 proxy
-    /// (host:port) instead of connecting to the real destination
-    /// directly. Applies uniformly to TLS-intercepted and bypassed/plain
-    /// TCP traffic. Useful for pointing a sandbox's entire egress at an
-    /// external inspection proxy (e.g. mitmproxy in `--mode socks5`)
-    /// without the guest needing to know a proxy exists.
+    /// Dial all outbound sandbox connections through this proxy.
+    /// Currently only the socks5:// protocol is supported.
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "HOST:PORT")]
-    pub transparent_proxy: Option<SocketAddr>,
+    #[arg(long, value_name = "socks5://IP:PORT")]
+    pub proxy: Option<String>,
 
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
@@ -539,6 +534,7 @@ impl SandboxOpts {
             || self.net_default_ingress.is_some()
             || self.max_connections.is_some()
             || self.trust_host_cas
+            || self.proxy.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -1538,6 +1534,12 @@ fn apply_network_opts(
         });
     }
 
+    let proxy = opts
+        .proxy
+        .as_deref()
+        .map(str::parse::<OutboundProxy>)
+        .transpose()?;
+
     // DNS, TLS, and other network configuration.
     let has_network_config = opts.no_dns_rebind_protection
         || !opts.dns_nameserver.is_empty()
@@ -1552,7 +1554,6 @@ fn apply_network_opts(
         || opts.net_ipv6_pool.is_some()
         || opts.max_connections.is_some()
         || opts.trust_host_cas
-        || opts.transparent_proxy.is_some()
         || opts.tls_intercept
         || !opts.tls_intercept_port.is_empty()
         || !opts.tls_bypass.is_empty()
@@ -1598,7 +1599,6 @@ fn apply_network_opts(
             })
             .transpose()?;
         let trust_host_cas = opts.trust_host_cas;
-        let transparent_proxy = opts.transparent_proxy;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
@@ -1641,9 +1641,6 @@ fn apply_network_opts(
             }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
-            }
-            if let Some(proxy_addr) = transparent_proxy {
-                n = n.transparent_proxy(proxy_addr);
             }
             if let Some(action) = violation_action {
                 n = n.on_secret_violation(|_| {
@@ -1701,6 +1698,10 @@ fn apply_network_opts(
 
             n
         });
+    }
+
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(|_| proxy);
     }
 
     Ok(builder)

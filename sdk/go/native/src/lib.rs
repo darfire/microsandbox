@@ -38,7 +38,7 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     os::raw::{c_char, c_uchar},
     path::PathBuf,
     sync::{
@@ -892,10 +892,12 @@ struct NetworkOpts {
     on_secret_violation: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
-    /// SOCKS5 proxy (`host:port`) that all outbound sandbox connections are
-    /// dialed through, in place of connecting to the real destination
-    /// directly.
-    transparent_proxy: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OutboundProxyOpts {
+    protocol: String,
+    address: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1017,6 +1019,8 @@ struct SandboxCreateOpts {
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
     network: Option<NetworkOpts>,
+    /// Proxy that all outbound sandbox connections are dialed through.
+    proxy: Option<OutboundProxyOpts>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -1333,14 +1337,6 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
-    }
-
-    // Transparent SOCKS5 proxy for outbound sandbox connections.
-    if let Some(ref raw) = net.transparent_proxy {
-        let addr: SocketAddr = raw
-            .parse()
-            .map_err(|e| FfiError::invalid_argument(format!("transparent_proxy {raw:?}: {e}")))?;
-        builder = builder.network(move |n| n.transparent_proxy(addr));
     }
 
     // Sandbox-wide secret violation action.
@@ -2130,6 +2126,16 @@ pub unsafe extern "C" fn msb_sandbox_create(
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
                 builder = apply_network(builder, net)?;
+            }
+            if let Some(proxy) = opts.proxy {
+                builder = match proxy.protocol.as_str() {
+                    "socks5" => builder.proxy(move |p| p.socks5(proxy.address)),
+                    protocol => {
+                        return Err(FfiError::invalid_argument(format!(
+                            "unsupported outbound proxy protocol {protocol:?}"
+                        )));
+                    }
+                };
             }
             // Secrets.
             for s in &opts.secrets {

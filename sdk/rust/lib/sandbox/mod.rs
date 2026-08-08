@@ -108,6 +108,8 @@ pub use metrics::{
 };
 pub use microsandbox_image::{PullProgress, PullProgressHandle};
 #[cfg(feature = "net")]
+pub use microsandbox_network::OutboundProxy;
+#[cfg(feature = "net")]
 pub use microsandbox_network::builder::SecretBuilder;
 #[cfg(feature = "net")]
 pub use microsandbox_network::config::NetworkConfig;

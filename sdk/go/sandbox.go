@@ -134,6 +134,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	if o.Network != nil {
 		ffiOpts.Network = buildFFINetwork(o.Network)
 	}
+	ffiOpts.Proxy = buildFFIOutboundProxy(o.Proxy)
 
 	for _, s := range o.Secrets {
 		ffiOpts.Secrets = append(ffiOpts.Secrets, ffi.SecretOptions{
@@ -265,7 +266,6 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		MaxConnections:      n.MaxConnections,
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
-		TransparentProxy:    n.TransparentProxy,
 	}
 
 	if len(n.Rules) > 0 || n.DefaultEgress != "" || n.DefaultIngress != "" {
@@ -327,6 +327,16 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	return out
+}
+
+func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
+	if proxy == nil {
+		return nil
+	}
+	return &ffi.OutboundProxyOptions{
+		Protocol: proxy.protocol,
+		Address:  proxy.address,
+	}
 }
 
 func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
