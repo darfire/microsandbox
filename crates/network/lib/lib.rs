@@ -49,5 +49,5 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 
 pub use outbound_proxy::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
-    OutboundProxyParseError, Socks5ProxyBuilder,
+    OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder, Socks5ProxyBuilder,
 };

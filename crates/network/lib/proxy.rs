@@ -1116,7 +1116,9 @@ mod tests {
         // contacted directly; the SOCKS5 request below must carry this address.
         let http_proxy_addr: SocketAddr = "93.184.216.34:3128".parse().unwrap();
         let socks_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let outbound_proxy = OutboundProxy::Socks5(socks_listener.local_addr().unwrap());
+        let outbound_proxy = OutboundProxy::Socks5 {
+            address: socks_listener.local_addr().unwrap(),
+        };
         let socks_task = tokio::spawn(async move {
             let (mut client, _) = socks_listener.accept().await.unwrap();
 

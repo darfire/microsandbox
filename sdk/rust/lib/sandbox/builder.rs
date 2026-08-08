@@ -1901,9 +1901,29 @@ mod tests {
         let network = config.local_network_config().unwrap();
         assert_eq!(
             network.outbound_proxy,
-            Some(microsandbox_network::OutboundProxy::Socks5(
-                "127.0.0.1:1080".parse().unwrap()
-            ))
+            Some(microsandbox_network::OutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+            })
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_sets_socks4_outbound_proxy_with_user_id() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .proxy(|p| p.socks4("127.0.0.1:1080").user_id("sandbox"))
+            .build()
+            .await
+            .unwrap();
+
+        let network = config.local_network_config().unwrap();
+        assert_eq!(
+            network.outbound_proxy,
+            Some(microsandbox_network::OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: Some("sandbox".to_string()),
+            })
         );
     }
 

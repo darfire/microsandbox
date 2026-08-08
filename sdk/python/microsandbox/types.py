@@ -965,8 +965,18 @@ class PortBinding:
 class OutboundProxy:
     """Proxy used for outbound sandbox connections."""
 
-    protocol: Literal["socks5"]
+    protocol: Literal["socks4", "socks5"]
     address: str
+    user_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.protocol != "socks4" and self.user_id is not None:
+            raise ValueError("user_id is only supported for SOCKS4 proxies")
+
+    @classmethod
+    def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:
+        """Create a SOCKS4 outbound proxy."""
+        return cls(protocol="socks4", address=address, user_id=user_id)
 
     @classmethod
     def socks5(cls, address: str) -> OutboundProxy:
@@ -974,7 +984,10 @@ class OutboundProxy:
         return cls(protocol="socks5", address=address)
 
     def _to_dict(self) -> dict:
-        return {"protocol": self.protocol, "address": self.address}
+        value = {"protocol": self.protocol, "address": self.address}
+        if self.user_id is not None:
+            value["user_id"] = self.user_id
+        return value
 
 
 @dataclass(frozen=True, slots=True)

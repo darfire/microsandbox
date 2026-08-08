@@ -336,6 +336,7 @@ func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
 	return &ffi.OutboundProxyOptions{
 		Protocol: proxy.protocol,
 		Address:  proxy.address,
+		UserID:   proxy.userID,
 	}
 }
 

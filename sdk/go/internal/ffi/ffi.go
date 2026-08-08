@@ -1588,6 +1588,7 @@ type NetworkOptions struct {
 type OutboundProxyOptions struct {
 	Protocol string `json:"protocol"`
 	Address  string `json:"address"`
+	UserID   string `json:"user_id,omitempty"`
 }
 
 // PortBindingOptions publishes a host port on a specific host bind address.

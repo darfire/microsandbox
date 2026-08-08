@@ -624,6 +624,17 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_SOCKS4Proxy(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(SOCKS4Proxy("127.0.0.1:1080", SOCKS4ProxyOptions{UserID: "sandbox"})),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	if proxy["protocol"] != "socks4" || proxy["address"] != "127.0.0.1:1080" || proxy["user_id"] != "sandbox" {
+		t.Fatalf("proxy = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.

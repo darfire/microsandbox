@@ -407,6 +407,16 @@ pub fn sandbox_builder_from_args(
         let protocol = extract_required::<String>(&proxy, "protocol")?;
         let address = extract_required::<String>(&proxy, "address")?;
         builder = match protocol.as_str() {
+            "socks4" => {
+                let user_id = extract_opt::<String>(&proxy, "user_id")?;
+                builder.proxy(move |p| {
+                    let proxy = p.socks4(address);
+                    match user_id {
+                        Some(user_id) => proxy.user_id(user_id),
+                        None => proxy,
+                    }
+                })
+            }
             "socks5" => builder.proxy(move |p| p.socks5(address)),
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(

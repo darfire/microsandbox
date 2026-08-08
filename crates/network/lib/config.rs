@@ -294,7 +294,9 @@ mod tests {
     #[test]
     fn outbound_proxy_round_trips_through_wire_network_spec() {
         let mut config = NetworkConfig::default();
-        config.outbound_proxy = Some(OutboundProxy::Socks5("127.0.0.1:1080".parse().unwrap()));
+        config.outbound_proxy = Some(OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+        });
 
         let config_json = serde_json::to_value(&config).unwrap();
         let wire: microsandbox_types::NetworkSpec =
@@ -302,13 +304,46 @@ mod tests {
         let wire_proxy = wire.outbound_proxy.as_ref().unwrap();
         assert_eq!(
             wire_proxy,
-            &microsandbox_types::OutboundProxy::Socks5("127.0.0.1:1080".to_string())
+            &microsandbox_types::OutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".to_string(),
+            }
         );
         assert_eq!(
             serde_json::to_value(wire_proxy).unwrap(),
             serde_json::json!({
                 "protocol": "socks5",
                 "address": "127.0.0.1:1080",
+            })
+        );
+
+        let round_tripped: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+        assert_eq!(round_tripped.outbound_proxy, config.outbound_proxy);
+    }
+
+    #[test]
+    fn socks4_proxy_user_id_round_trips_through_wire_network_spec() {
+        let mut config = NetworkConfig::default();
+        config.outbound_proxy = Some(OutboundProxy::Socks4 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+            user_id: Some("sandbox".to_string()),
+        });
+
+        let wire: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(
+            wire.outbound_proxy,
+            Some(microsandbox_types::OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".to_string(),
+                user_id: Some("sandbox".to_string()),
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(wire.outbound_proxy.as_ref().unwrap()).unwrap(),
+            serde_json::json!({
+                "protocol": "socks4",
+                "address": "127.0.0.1:1080",
+                "user_id": "sandbox",
             })
         );
 

@@ -3,7 +3,7 @@ title: Proxies
 description: Python SDK - Proxy API reference
 ---
 
-Configure one proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive; currently only SOCKS5 is supported.
+Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
 
 See [Outbound proxy](/networking/outbound-proxy) for runtime behavior, security considerations, and current transport limitations.
 
@@ -31,4 +31,7 @@ Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
 
 | Class method | Returns | Description |
 |--------------|---------|-------------|
+| `socks4(address, *, user_id=None)` | `OutboundProxy` | Configure a SOCKS4 proxy at `IP:port` with an optional user ID |
 | `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |
+
+The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies the caller; it is not a password.

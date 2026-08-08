@@ -815,6 +815,22 @@ type RegistryAuth struct {
 type OutboundProxy struct {
 	protocol string
 	address  string
+	userID   string
+}
+
+// SOCKS4ProxyOptions configures optional SOCKS4 handshake fields.
+type SOCKS4ProxyOptions struct {
+	// UserID is the optional user ID sent during the SOCKS4 handshake.
+	UserID string
+}
+
+// SOCKS4Proxy configures a SOCKS4 outbound proxy at address.
+func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy {
+	proxy := &OutboundProxy{protocol: "socks4", address: address}
+	if len(options) > 0 {
+		proxy.userID = options[0].UserID
+	}
+	return proxy
 }
 
 // SOCKS5Proxy configures a SOCKS5 outbound proxy at address.

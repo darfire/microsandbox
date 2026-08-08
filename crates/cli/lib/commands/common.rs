@@ -360,9 +360,9 @@ pub struct SandboxOpts {
     pub trust_host_cas: bool,
 
     /// Dial all outbound sandbox connections through this proxy.
-    /// Currently only the socks5:// protocol is supported.
+    /// Supports the socks4:// and socks5:// protocols.
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "socks5://IP:PORT")]
+    #[arg(long, value_name = "socks[4|5]://IP:PORT")]
     pub proxy: Option<String>,
 
     // --- TLS interception ---

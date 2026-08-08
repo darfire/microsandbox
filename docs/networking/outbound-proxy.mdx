@@ -1,20 +1,20 @@
 ---
 title: Outbound proxy
-description: Route all outbound sandbox TCP traffic through an external SOCKS5 proxy
+description: Route all outbound sandbox TCP traffic through an external SOCKS proxy
 icon: "route"
 ---
 
-Point a sandbox's entire outbound TCP traffic at an external SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
+Point a sandbox's entire outbound TCP traffic at an external SOCKS4 or SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
 
 <Note>This setting is available for local sandboxes. Cloud sandbox specs do not expose user-configured egress proxies.</Note>
 
-The API models this as one optional outbound proxy. Protocols are mutually exclusive, and currently only SOCKS5 is supported.
+The API models this as one optional outbound proxy. SOCKS4 and SOCKS5 are supported and mutually exclusive.
 
 This is the same mechanism inspection tools like [mitmproxy](https://mitmproxy.org) expose via `--mode socks5`: select a SOCKS5 outbound proxy and every sandbox connection flows through mitmproxy for logging or debugging, with zero guest-side proxy configuration.
 
 ## How it works
 
-Every outbound TCP connection a sandbox opens is proxied by the host regardless of whether `outbound_proxy` is set — normally the host dials the real destination directly. When a SOCKS5 outbound proxy is configured, that final dial is replaced with a SOCKS5 handshake to the configured proxy, which is then asked to `CONNECT` to the real destination on the sandbox's behalf.
+Every outbound TCP connection a sandbox opens is proxied by the host regardless of whether `outbound_proxy` is set — normally the host dials the real destination directly. When an outbound proxy is configured, that final dial is replaced with a SOCKS handshake to the configured proxy, which is then asked to `CONNECT` to the real destination on the sandbox's behalf.
 
 Everything upstream of that dial is unaffected:
 
@@ -66,7 +66,34 @@ msb create python --name inspected --proxy socks5://127.0.0.1:8080
 ```
 </CodeGroup>
 
-SDKs use typed protocol-specific configuration. The CLI uses a `socks5://IP:port` URI because a string flag needs a protocol discriminator. Credentials, paths, query parameters, and fragments are not supported.
+SDKs use typed protocol-specific configuration. The CLI accepts `socks4://IP:port` and `socks5://IP:port` because a string flag needs a protocol discriminator. User info, paths, query parameters, and fragments are not supported in CLI proxy URIs.
+
+## SOCKS4 user IDs
+
+SOCKS4 can include an optional user ID in its handshake. Configure it through the SDK API:
+
+<CodeGroup>
+```rust Rust
+.proxy(|p| p.socks4("127.0.0.1:1080").user_id("sandbox"))
+```
+
+```typescript TypeScript
+.proxy((p) => p.socks4("127.0.0.1:1080").userId("sandbox"))
+```
+
+```python Python
+proxy=OutboundProxy.socks4("127.0.0.1:1080", user_id="sandbox")
+```
+
+```go Go
+m.WithProxy(m.SOCKS4Proxy(
+    "127.0.0.1:1080",
+    m.SOCKS4ProxyOptions{UserID: "sandbox"},
+))
+```
+</CodeGroup>
+
+The user ID is an identifier, not a password. The CLI currently creates SOCKS4 connections with no user ID.
 
 ## Inspecting traffic with mitmproxy
 
@@ -100,10 +127,11 @@ Without one of these CA configurations, mitmproxy can record the TCP connection 
 
 ## Limits
 
-- **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the SOCKS5 proxy — SOCKS5's `UDP ASSOCIATE` command isn't used here. Only the TCP relay path dials through the proxy.
+- **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the proxy. SOCKS5's `UDP ASSOCIATE` command isn't used here; SOCKS4 has no UDP relay command.
 - **DNS resolution bypasses it too.** DNS-over-TCP and DNS-over-TLS both go through microsandbox's own DNS forwarder, not the configured proxy, regardless of protocol.
-- **One proxy connection per sandbox connection.** SOCKS5 has no multiplexing — each guest TCP connection opens a new TCP connection and handshake to the proxy. This mirrors how any SOCKS5 client works and isn't specific to microsandbox.
-- **No authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy.
+- **SOCKS4 destinations must be IPv4.** SOCKS4 cannot carry IPv6 destination addresses, and microsandbox does not use the SOCKS4a domain-name extension.
+- **One proxy connection per sandbox connection.** Each guest TCP connection opens a new TCP connection and handshake to the proxy; connections are not multiplexed.
+- **No SOCKS5 authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy. A SOCKS4 user ID is not password authentication.
 
 ## See also
 

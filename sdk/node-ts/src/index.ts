@@ -353,6 +353,7 @@ export const TlsBuilder = napi.TlsBuilder;
 export const SecretBuilder = napi.SecretBuilder;
 export const NetworkBuilder = napi.NetworkBuilder;
 export const OutboundProxyBuilder = napi.OutboundProxyBuilder;
+export const Socks4ProxyBuilder = napi.Socks4ProxyBuilder;
 export const Socks5ProxyBuilder = napi.Socks5ProxyBuilder;
 export const MountBuilder = napi.MountBuilder;
 export const PatchBuilder = napi.PatchBuilder;
@@ -369,9 +370,11 @@ import type {
   NapiRootDiskBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
+  NapiSocks4ProxyBuilder,
   NapiSocks5ProxyBuilder,
 } from "./internal/napi.js";
 export type OutboundProxyBuilder = NapiOutboundProxyBuilder;
+export type Socks4ProxyBuilder = NapiSocks4ProxyBuilder;
 export type Socks5ProxyBuilder = NapiSocks5ProxyBuilder;
 export const NetworkPolicyBuilder = napi.NetworkPolicyBuilder;
 export type NetworkPolicyBuilder = NapiNetworkPolicyBuilder;

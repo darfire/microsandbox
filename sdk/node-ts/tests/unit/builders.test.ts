@@ -362,6 +362,21 @@ describe("SandboxBuilder.build", () => {
     });
   });
 
+  it("renders a SOCKS4 proxy with an optional user ID", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) => p.socks4("127.0.0.1:1080").userId("sandbox"))
+      .build();
+
+    expect(cfg.network).toMatchObject({
+      outboundProxy: {
+        protocol: "socks4",
+        address: "127.0.0.1:1080",
+        userId: "sandbox",
+      },
+    });
+  });
+
   it("collects volumes through the MountBuilder callback", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")
@@ -595,6 +610,14 @@ describe("SandboxBuilder outbound proxy", () => {
     expect(() =>
       Sandbox.builder("x").proxy((p) => p.socks5("not-an-address")),
     ).toThrow(/invalid SOCKS5 proxy address/);
+  });
+
+  it("rejects invalid SOCKS4 user IDs", () => {
+    expect(() =>
+      Sandbox.builder("x").proxy((p) =>
+        p.socks4("127.0.0.1:1080").userId(""),
+      ),
+    ).toThrow(/invalid SOCKS4 user ID/);
   });
 });
 

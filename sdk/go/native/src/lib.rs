@@ -898,6 +898,8 @@ struct NetworkOpts {
 struct OutboundProxyOpts {
     protocol: String,
     address: String,
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2129,6 +2131,13 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(proxy) = opts.proxy {
                 builder = match proxy.protocol.as_str() {
+                    "socks4" => builder.proxy(move |p| {
+                        let proxy_builder = p.socks4(proxy.address);
+                        match proxy.user_id {
+                            Some(user_id) => proxy_builder.user_id(user_id),
+                            None => proxy_builder,
+                        }
+                    }),
                     "socks5" => builder.proxy(move |p| p.socks5(proxy.address)),
                     protocol => {
                         return Err(FfiError::invalid_argument(format!(

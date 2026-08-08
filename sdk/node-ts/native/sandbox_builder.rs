@@ -18,7 +18,9 @@ use crate::image_builder::JsImageBuilder;
 use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_builder::JsNetworkBuilder;
-use crate::outbound_proxy_builder::{JsOutboundProxyBuilder, JsSocks5ProxyBuilder};
+use crate::outbound_proxy_builder::{
+    JsOutboundProxyBuilder, JsSocks4ProxyBuilder, JsSocks5ProxyBuilder, take_selected_proxy,
+};
 use crate::patch_builder::JsPatchBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::registry_builder::JsRegistryConfigBuilder;
@@ -36,6 +38,7 @@ type _NapiHints = (
     JsTlsBuilder,
     JsSecretBuilder,
     JsOutboundProxyBuilder,
+    JsSocks4ProxyBuilder,
     JsSocks5ProxyBuilder,
 );
 
@@ -452,18 +455,19 @@ impl JsSandboxBuilder {
     }
 
     /// Configure the single proxy used for outbound sandbox connections.
-    #[napi]
+    #[napi(
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder"
+    )]
     pub fn proxy(
         &mut self,
         env: &Env,
-        configure: Function<
-            ClassInstance<JsOutboundProxyBuilder>,
-            ClassInstance<JsSocks5ProxyBuilder>,
-        >,
+        configure: Function<ClassInstance<JsOutboundProxyBuilder>, Unknown<'_>>,
     ) -> Result<&Self> {
-        let initial = JsOutboundProxyBuilder::new().into_instance(env)?;
-        let mut returned = configure.call(initial)?;
-        let proxy = returned.take_built()?;
+        let selector = JsOutboundProxyBuilder::new();
+        let selection = selector.selection();
+        let initial = selector.into_instance(env)?;
+        configure.call(initial)?;
+        let proxy = take_selected_proxy(&selection)?;
         let prev = self.take_inner();
         self.inner = Some(prev.proxy(|_| proxy.clone()));
         self.outbound_proxy = Some(proxy);

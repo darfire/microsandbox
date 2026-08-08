@@ -62,10 +62,16 @@ export interface SecretEntry {
 }
 
 /** Proxy used for outbound sandbox connections. */
-export type OutboundProxy = {
-  readonly protocol: "socks5";
-  readonly address: string;
-};
+export type OutboundProxy =
+  | {
+      readonly protocol: "socks4";
+      readonly address: string;
+      readonly userId?: string;
+    }
+  | {
+      readonly protocol: "socks5";
+      readonly address: string;
+    };
 
 /** Built network configuration produced by `NetworkBuilder.build()`. */
 export interface NetworkConfig {
