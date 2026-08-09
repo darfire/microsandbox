@@ -562,7 +562,7 @@ impl SandboxBuilder {
 
     /// Configure the single proxy used for outbound sandbox connections.
     ///
-    /// Currently supports SOCKS5. The proxy applies uniformly to
+    /// Currently supports SOCKS4 and SOCKS5. The proxy applies uniformly to
     /// TLS-intercepted and bypassed/plain TCP traffic.
     #[cfg(feature = "net")]
     pub fn proxy<P>(mut self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
