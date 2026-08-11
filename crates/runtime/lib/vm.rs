@@ -27,6 +27,7 @@ use microsandbox_protocol::{
     codec,
     message::{Message, MessageType},
 };
+use microsandbox_types::CpuPlacement;
 use msb_krun::VmBuilder;
 use sea_orm::{ColumnTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,9 @@ const EXIT_REASON_PARENT_EXIT: u8 = 4;
 const EXIT_REASON_AGENT_UNRESPONSIVE: u8 = 5;
 const EXIT_REASON_SHUTDOWN_REQUESTED: u8 = 6;
 const EXIT_REASON_STARTUP_COMMAND_FAILED: u8 = 7;
+
+/// Bounds how long an existing VMM can retain an obsolete fair share after membership changes.
+const WRITEBACK_PRESSURE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Fixed fd carrying the bulk `msb sandbox` config (argv overflow) as
 /// NUL-terminated argument records. Keeps the network-config blob and the
@@ -109,6 +113,15 @@ pub struct Config {
     /// lifecycle maintenance can remove ephemeral sandbox directories without
     /// inferring the path from `log_dir`.
     pub sandboxes_dir: PathBuf,
+
+    /// Internal directory containing process-held CPU allocation leases.
+    pub cpu_lease_dir: PathBuf,
+
+    /// Internal directory containing process-held writeback pressure leases.
+    pub writeback_lease_dir: PathBuf,
+
+    /// Host-global dirty-credit pool shared fairly by live writable disks.
+    pub block_writeback_pool_bytes: Option<u64>,
 
     /// Path to the Unix domain socket for the agent relay.
     pub agent_sock_path: PathBuf,
@@ -249,6 +262,9 @@ pub struct VmConfig {
     /// Path to the libkrunfw shared library.
     pub libkrunfw_path: PathBuf,
 
+    /// Guest transparent huge-page policy selected at boot.
+    pub thp: microsandbox_types::TransparentHugePagePolicy,
+
     /// Number of virtual CPUs online at boot.
     pub vcpus: u8,
 
@@ -260,6 +276,12 @@ pub struct VmConfig {
 
     /// Maximum guest memory in MiB reserved for future hotplug (virtio-mem).
     pub max_memory_mib: u32,
+
+    /// Requested host CPU placement policy.
+    pub cpu_placement: CpuPlacement,
+
+    /// Per-writable-raw-disk hard budget for buffered host dirty data.
+    pub block_writeback_limit_bytes: Option<u64>,
 
     /// Root filesystem path for direct passthrough mounts.
     pub rootfs_path: Option<PathBuf>,
@@ -401,10 +423,15 @@ impl std::fmt::Debug for VmConfig {
         let mut debug = f.debug_struct("VmConfig");
         debug
             .field("libkrunfw_path", &self.libkrunfw_path)
+            .field("thp", &self.thp)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
+            .field(
+                "block_writeback_limit_bytes",
+                &self.block_writeback_limit_bytes,
+            )
             .field("rootfs_path", &self.rootfs_path)
             .field("rootfs_vmdk", &self.rootfs_vmdk)
             .field("rootfs_upper", &self.rootfs_upper)
@@ -512,6 +539,55 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
+        Ok(disk_paths) => disk_paths,
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let cpu_guard = match tokio_rt.block_on(crate::cpu::acquire(
+        &db,
+        run_db_id,
+        &config.cpu_lease_dir,
+        config.vm.cpu_placement,
+        config.vm.max_cpus.max(config.vm.vcpus),
+    )) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+
+    let writeback_guard = match tokio_rt.block_on(crate::writeback::acquire(
+        &db,
+        run_db_id,
+        &config.writeback_lease_dir,
+        config.block_writeback_pool_bytes,
+        config.vm.block_writeback_limit_bytes,
+        &writeback_disk_paths,
+    )) {
+        Ok(guard) => guard,
+        Err(error) => {
+            if let Err(release_error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%release_error, "release CPU placement after writeback pressure setup failure");
+            }
+            let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
+            return Err(error);
+        }
+    };
+    let writeback_guard = Arc::new(writeback_guard);
+    let writeback_limit = writeback_guard.limit();
+    if writeback_guard.is_managed() {
+        let pressure_guard = Arc::clone(&writeback_guard);
+        let pressure_db = db.clone();
+        tokio_rt.spawn(async move {
+            monitor_writeback_pressure(pressure_guard, pressure_db).await;
+        });
+    }
+
     // Attach the exec.log writer so the ring reader can capture the
     // primary session's stdout/stderr. Failure to open the file is
     // non-fatal — log capture is best-effort and must not block boot.
@@ -568,6 +644,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     // without re-opening the registry (saving two mmap syscalls and a
     // potential `wait_for_ready` round-trip on the VMM's exit path).
     let exit_metrics_writer = metrics_writer.clone();
+    let exit_cpu_guard = Arc::clone(&cpu_guard);
+    let exit_writeback_guard = Arc::clone(&writeback_guard);
     #[cfg(windows)]
     let _agent_console_pipe_bridge = AgentConsolePipeBridge::spawn(
         agent_console_pipe_name(config.sandbox_id),
@@ -599,6 +677,13 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
 
             rt_handle.block_on(async {
                 let now = chrono::Utc::now().naive_utc();
+
+                if let Err(error) = exit_writeback_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release writeback pressure membership at VM exit");
+                }
+                if let Err(error) = exit_cpu_guard.release(&exit_db).await {
+                    tracing::warn!(%error, "release CPU placement at VM exit");
+                }
 
                 // Mark run as terminated with exit code and reason.
                 let _ = run_entity::Entity::update_many()
@@ -674,6 +759,8 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
             let _ = std::fs::remove_file(&exit_sock_path);
         },
         tokio_rt.handle().clone(),
+        cpu_guard.vcpu_targets(),
+        writeback_limit.as_ref(),
     );
     let (
         vm,
@@ -684,6 +771,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     ) = match build_result {
         Ok(vm) => vm,
         Err(e) => {
+            if let Err(error) = tokio_rt.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM build failure");
+            }
+            if let Err(error) = tokio_rt.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM build failure");
+            }
             let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
             // Free the slot: build_vm never started the sampler, so no live
             // sample is worth preserving. Prefer the writer (already holds
@@ -1052,6 +1145,7 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     }
 
     // Forget the tokio runtime (keep background tasks alive).
+    let cleanup_rt_handle = tokio_rt.handle().clone();
     std::mem::forget(tokio_rt);
 
     // Enter the VM (never returns).
@@ -1059,6 +1153,12 @@ fn run(config: Config) -> RuntimeResult<std::convert::Infallible> {
     match vm.enter() {
         Ok(infallible) => Ok(infallible),
         Err(e) => {
+            if let Err(error) = cleanup_rt_handle.block_on(writeback_guard.release(&db)) {
+                tracing::warn!(%error, "release writeback pressure membership after VM enter failure");
+            }
+            if let Err(error) = cleanup_rt_handle.block_on(cpu_guard.release(&db)) {
+                tracing::warn!(%error, "release CPU placement after VM enter failure");
+            }
             if let Some(writer) = metrics_writer {
                 let _ = writer.release(ReleaseMode::Free);
             }
@@ -1088,12 +1188,66 @@ fn agent_console_pipe_name(sandbox_id: i32) -> String {
 // Functions: VM Builder
 //--------------------------------------------------------------------------------------------------
 
+fn apply_block_writeback_limit(
+    mut disk: msb_krun::DiskBuilder,
+    format: msb_krun::DiskImageFormat,
+    read_only: bool,
+    limit: Option<&msb_krun::WritebackLimit>,
+) -> msb_krun::DiskBuilder {
+    if !read_only
+        && matches!(format, msb_krun::DiskImageFormat::Raw)
+        && let Some(limit) = limit
+    {
+        disk = disk.writeback_limit(limit.clone());
+    }
+    disk
+}
+
+fn writeback_limited_disk_paths(vm: &VmConfig) -> RuntimeResult<Vec<PathBuf>> {
+    if vm.block_writeback_limit_bytes.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    if vm.rootfs_path.is_some() {
+        // Direct root filesystems do not attach a virtio-blk device.
+    } else if vm.rootfs_vmdk.is_some() {
+        if let Some(spec) = &vm.rootfs_upper_spec {
+            if is_writeback_limited_disk(spec.format, spec.read_only) {
+                paths.push(spec.primary.clone());
+            }
+        } else if let Some(upper) = &vm.rootfs_upper {
+            paths.push(upper.clone());
+        }
+    } else if let Some(rootfs_disk) = &vm.rootfs_disk {
+        let format = validate_disk_format(vm.rootfs_disk_format.as_deref())
+            .map_err(|error| RuntimeError::Custom(format!("disk format: {error}")))?;
+        if is_writeback_limited_disk(format, vm.rootfs_disk_readonly) {
+            paths.push(rootfs_disk.clone());
+        }
+    }
+
+    paths.extend(
+        vm.disks
+            .iter()
+            .filter(|disk| is_writeback_limited_disk(disk.format, disk.readonly))
+            .map(|disk| disk.host.clone()),
+    );
+    Ok(paths)
+}
+
+fn is_writeback_limited_disk(format: msb_krun::DiskImageFormat, read_only: bool) -> bool {
+    !read_only && matches!(format, msb_krun::DiskImageFormat::Raw)
+}
+
 /// Build the `Vm` from config with an exit observer for cleanup.
 fn build_vm(
     config: &Config,
     console_backend: AgentConsoleBackend,
     on_exit: impl Fn(i32) + Send + 'static,
     tokio_handle: tokio::runtime::Handle,
+    vcpu_targets: Option<&[crate::cpu::LogicalCpuId]>,
+    writeback_limit: Option<&msb_krun::WritebackLimit>,
 ) -> RuntimeResult<VmBuildOutput> {
     let mut exec_env = config.vm.env.clone();
     let vm = &config.vm;
@@ -1107,12 +1261,21 @@ fn build_vm(
 
     let mut builder = VmBuilder::new()
         .machine(|m| {
-            let m = m
+            let mut m = m
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
                 .balloon_stats_interval(balloon_stats_interval);
+            if let Some(targets) = vcpu_targets {
+                m = m.vcpu_affinity(
+                    targets
+                        .iter()
+                        .copied()
+                        .map(|cpu| msb_krun::HostCpuId::in_group(cpu.group, cpu.index))
+                        .collect(),
+                );
+            }
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 m.split_irqchip(true)
@@ -1123,7 +1286,11 @@ fn build_vm(
             }
         })
         .kernel(|k| {
-            let k = k.krunfw_path(&vm.libkrunfw_path);
+            // Apply the typed policy before PID 1 starts. Keeping the raw
+            // kernel command line internal avoids exposing a general-purpose
+            // boot-argument escape hatch to sandbox users.
+            let thp = thp_kernel_cmdline(vm.thp);
+            let k = k.krunfw_path(&vm.libkrunfw_path).cmdline(&thp);
             if let Some(ref init_path) = vm.init_path {
                 k.init_path(init_path)
             } else {
@@ -1181,13 +1348,18 @@ fn build_vm(
             let primary = spec.primary.clone();
             let format = spec.format;
             let read_only = spec.read_only;
-            builder = builder.disk(move |d| d.path(&primary).format(format).read_only(read_only));
+            let writeback_limit = writeback_limit.cloned();
+            builder = builder.disk(move |d| {
+                let d = d.path(&primary).format(format).read_only(read_only);
+                apply_block_writeback_limit(d, format, read_only, writeback_limit.as_ref())
+            });
         } else if let Some(ref upper) = vm.rootfs_upper {
             let upper = upper.clone();
+            let format = msb_krun::DiskImageFormat::Raw;
+            let writeback_limit = writeback_limit.cloned();
             builder = builder.disk(move |d| {
-                d.path(&upper)
-                    .format(msb_krun::DiskImageFormat::Raw)
-                    .read_only(false)
+                let d = d.path(&upper).format(format).read_only(false);
+                apply_block_writeback_limit(d, format, false, writeback_limit.as_ref())
             });
         }
 
@@ -1218,7 +1390,11 @@ fn build_vm(
             .map_err(|e| RuntimeError::Custom(format!("disk format: {e}")))?;
         let disk_path = disk_path.clone();
         let readonly = vm.rootfs_disk_readonly;
-        builder = builder.disk(move |d| d.path(&disk_path).format(format).read_only(readonly));
+        let writeback_limit = writeback_limit.cloned();
+        builder = builder.disk(move |d| {
+            let d = d.path(&disk_path).format(format).read_only(readonly);
+            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
+        });
         append_block_root_env(&mut exec_env);
     }
 
@@ -1294,6 +1470,7 @@ fn build_vm(
         let host = disk.host.clone();
         let format = disk.format;
         let readonly = disk.readonly;
+        let writeback_limit = writeback_limit.cloned();
         builder = builder.disk(move |d| {
             let mut d = d.id(&id).path(&host).format(format).read_only(readonly);
             if readonly {
@@ -1302,7 +1479,7 @@ fn build_vm(
                     .cache(msb_krun::CacheMode::Unsafe)
                     .sync(msb_krun::SyncMode::None);
             }
-            d
+            apply_block_writeback_limit(d, format, readonly, writeback_limit.as_ref())
         });
     }
 
@@ -1422,6 +1599,37 @@ fn build_vm(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+async fn monitor_writeback_pressure(
+    guard: Arc<crate::writeback::WritebackPressureGuard>,
+    db: DbWriteConnection,
+) {
+    let mut interval = tokio::time::interval(WRITEBACK_PRESSURE_REFRESH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Acquisition already installed the initial target, so avoid an unnecessary immediate query.
+    interval.tick().await;
+    let mut coordination_failed = false;
+
+    loop {
+        interval.tick().await;
+        match guard.refresh(&db).await {
+            Ok(()) if coordination_failed => {
+                tracing::info!("writeback pressure coordination recovered");
+                coordination_failed = false;
+            }
+            Ok(()) => {}
+            Err(error) => {
+                // Losing the coordinator must reduce throughput, never silently restore the full
+                // per-disk window while the active host membership is unknown.
+                guard.fail_closed();
+                if !coordination_failed {
+                    tracing::warn!(%error, "writeback pressure coordination failed closed");
+                    coordination_failed = true;
+                }
+            }
+        }
+    }
+}
 
 /// Raise `RLIMIT_NOFILE` to the hard limit, capped at 1M (the reference virtiofsd default). On macOS the soft limit is additionally clamped to
 /// `kern.maxfilesperproc`, which `setrlimit` enforces even when the hard limit is unlimited.
@@ -2121,6 +2329,11 @@ pub fn prepend_scripts_path(env: &mut Vec<String>) {
     }
 }
 
+/// Render the validated THP policy as the single Linux boot parameter the VMM appends.
+fn thp_kernel_cmdline(policy: microsandbox_types::TransparentHugePagePolicy) -> String {
+    format!("transparent_hugepage={}", policy.as_str())
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -2136,7 +2349,8 @@ mod tests {
         ConsoleSharedState, HostPermissions, StatVirtualization, append_block_root_env,
         bind_rootfs_backend, guest_shutdown_flush_timeout,
         guest_shutdown_flush_timeout_with_override, parse_mount_spec, prepend_scripts_path,
-        request_guest_shutdown, request_guest_shutdown_with_timeout, validate_disk_format,
+        request_guest_shutdown, request_guest_shutdown_with_timeout, thp_kernel_cmdline,
+        validate_disk_format,
     };
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
@@ -2153,6 +2367,24 @@ mod tests {
             gid: 0,
             pid: 1,
         }
+    }
+
+    #[test]
+    fn transparent_huge_page_policy_maps_to_kernel_boot_parameter() {
+        use microsandbox_types::TransparentHugePagePolicy;
+
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Always),
+            "transparent_hugepage=always"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Madvise),
+            "transparent_hugepage=madvise"
+        );
+        assert_eq!(
+            thp_kernel_cmdline(TransparentHugePagePolicy::Never),
+            "transparent_hugepage=never"
+        );
     }
 
     #[test]

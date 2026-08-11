@@ -5,22 +5,6 @@ description: Rust SDK - Sandbox API reference
 
 Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-<p className="msb-label" id="typical-flow">Typical flow</p>
-
-```rust
-use microsandbox::Sandbox;
-
-let sb = Sandbox::builder("api")             // 1. configure
-    .image("python")
-    .memory(1024)
-    .create()                                // 2. boot the microVM
-    .await?;
-
-let out = sb.exec("python", ["-V"]).await?;  // 3. run
-println!("{}", out.stdout()?);
-
-sb.stop().await?;                            // 4. shut down
-```
 
 ## Static methods
 
@@ -733,7 +717,7 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
 
 ## SandboxBuilder
 
-Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious; simple setters are demonstrated by the [Typical flow](#typical-flow) above.
+Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">build()</span>
 
@@ -876,7 +860,7 @@ Fully disable networking. No network interface is created.
 fn entrypoint(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
 ```
 
-Override the OCI image's stored ENTRYPOINT. The value is consulted by command-resolution paths that follow OCI semantics, specifically `msb exec` / `msb run` against this sandbox from the terminal. [`Sandbox::exec`](/sdk/rust/execution) and [`Sandbox::shell`](/sdk/rust/execution) do **not** consult it; they pass `cmd` literally to the guest agent. Use this when configuring a sandbox via the SDK for later CLI attachment.
+Override the image ENTRYPOINT used by default-workload execution. [`Sandbox::exec_default`](/sdk/rust/execution) combines it with the effective CMD. Literal [`Sandbox::exec`](/sdk/rust/execution), [`Sandbox::attach`](/sdk/rust/execution), and [`Sandbox::shell`](/sdk/rust/execution) calls ignore it.
 
 <p className="msb-label">Parameters</p>
 
@@ -941,6 +925,22 @@ Auto-drain the sandbox after this many seconds of inactivity (no active exec ses
     <div className="msb-param-desc">Idle timeout in seconds.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">cmd()</span>
+
+```rust
+fn cmd(self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Override the image CMD used by default-workload execution. An empty array explicitly clears the image CMD. This describes durable configuration and does not execute anything during `create()`.
+
+```rust
+let sb = Sandbox::builder("worker")
+    .image("example/worker:latest")
+    .cmd(["worker.py", "--once"])
+    .create()
+    .await?;
+```
 
 #### <span className="msb-recv">.</span><span className="msb-hn">init()</span>
 
@@ -1124,6 +1124,23 @@ Set the boot-time maximum hotpluggable guest memory. This reserves the envelope 
   <div className="msb-param">
     <div className="msb-param-key"><code>size</code><span className="msb-type">impl Into&lt;Mebibytes&gt;</span></div>
     <div className="msb-param-desc">Maximum memory in MiB.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">.</span><span className="msb-hn">thp()</span>
+
+```rust
+fn thp(self, policy: TransparentHugePagePolicy) -> Self
+```
+
+Select the guest transparent huge-page policy applied through the kernel command line at boot. Default: `TransparentHugePagePolicy::Madvise`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">TransparentHugePagePolicy</span></div>
+    <div className="msb-param-desc"><code>Always</code>, <code>Madvise</code>, or <code>Never</code>.</div>
   </div>
 </div>
 

@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod cloud;
+mod command;
 mod domain;
 mod error;
 pub mod modify;
@@ -23,17 +24,20 @@ pub use cloud::{
     CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
     CloudViolationAction, CloudVolumeMount,
 };
+#[doc(hidden)]
+pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};
 pub use domain::{
-    Action, CertCacheConfig, DEFAULT_METRICS_SAMPLE_INTERVAL_MS, DEFAULT_SANDBOX_CPUS,
-    DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination, DestinationGroup, Direction,
-    DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit, HostPattern, HostPermissions,
-    InterceptCaConfig, InterfaceOverrides, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MountOptions,
-    NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkSpec, OciRootfsSource, OutboundProxy,
-    Patch, PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, Rlimit,
-    RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxResources,
-    SandboxRuntimeOptions, SandboxSpec, ScopedUpstreamCaCert, ScopedVerifyUpstream,
-    SecretConfigError, SecretEntry, SecretInjection, SecretsConfig, SecurityProfile, SnapshotSpec,
-    StatVirtualization, TlsConfig, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
+    Action, CertCacheConfig, CpuPlacement, DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
+    DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination,
+    DestinationGroup, Direction, DiskImageFormat, DnsConfig, EnvVar, FlatClone, HandoffInit,
+    HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides, LogSource,
+    MAX_SECRET_PLACEHOLDER_BYTES, MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy,
+    NetworkSpec, OciRootfsSource, OutboundProxy, Patch, PortProtocol, PortRange, Protocol,
+    PublishedPortSpec, PullPolicy, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule,
+    SandboxLogLevel, SandboxPolicy, SandboxResources, SandboxRuntimeOptions, SandboxSpec,
+    ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretInjection,
+    SecretsConfig, SecurityProfile, SnapshotSpec, StatVirtualization, TlsConfig,
+    TransparentHugePagePolicy, ViolationAction, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use error::{TypesError, TypesResult};
 pub use modify::{
