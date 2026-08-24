@@ -129,6 +129,7 @@ from microsandbox.types import (
     NetworkDestinationKind,
     NetworkPolicy,
     NetworkProfile,
+    NetworkRateLimiter,
     OutboundProxy,
     Patch,
     PatchConfig,
@@ -140,6 +141,7 @@ from microsandbox.types import (
     Protocol,
     PullEventType,
     PullPolicy,
+    RateLimiter,
     RegistryAuth,
     ResourceConvergenceState,
     ResourceKind,
@@ -169,9 +171,12 @@ from microsandbox.types import (
     Stdin,
     StdinMode,
     TlsConfig,
+    TokenBucket,
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
+    VsockRoute,
+    VsockSocketType,
 )
 
 # Pass the bundled msb path to Rust explicitly. `MSB_PATH` remains a user
@@ -265,6 +270,7 @@ __all__ = [
     "Network",
     "NetworkPolicy",
     "NetworkProfile",
+    "NetworkRateLimiter",
     "OutboundProxy",
     "Rule",
     "Destination",
@@ -275,7 +281,11 @@ __all__ = [
     "Protocol",
     "PortBinding",
     "PortProtocol",
+    "VsockRoute",
+    "VsockSocketType",
     "DestGroup",
+    "RateLimiter",
+    "TokenBucket",
     # Secrets & TLS
     "Secret",
     "SecretEntry",

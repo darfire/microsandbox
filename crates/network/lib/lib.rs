@@ -14,24 +14,21 @@
 mod addr;
 mod outbound_proxy;
 
-pub mod backend;
-pub mod builder;
 pub mod config;
-pub mod conn;
-pub mod device;
 pub mod dns;
-pub mod icmp_error;
-pub mod icmp_relay;
+pub mod icmp;
+pub mod netstack;
 pub mod network;
 pub mod policy;
-pub mod proxy;
-pub mod publisher;
+pub mod ports;
 pub mod secrets;
-pub mod shared;
-pub mod stack;
+pub mod tcp;
 pub mod tls;
-pub mod udp_fragments;
-pub mod udp_relay;
+pub mod udp;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -51,3 +48,10 @@ pub use outbound_proxy::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder, Socks5ProxyBuilder,
 };
+
+pub use config::builder;
+pub use icmp::{error as icmp_error, relay as icmp_relay};
+pub use netstack::{backend, device, poll as stack, shared};
+pub use ports::publisher;
+pub use tcp::{connection as conn, proxy};
+pub use udp::{fragments as udp_fragments, relay as udp_relay};

@@ -1549,6 +1549,7 @@ type CreateOptions struct {
 	MaxMemoryMiB         uint32               `json:"max_memory_mib,omitempty"`
 	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
+	PlacementProfile     string               `json:"placement_profile,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
@@ -1580,6 +1581,7 @@ type CreateOptions struct {
 	Ports           map[uint16]uint16     `json:"ports,omitempty"`
 	PortsUDP        map[uint16]uint16     `json:"ports_udp,omitempty"`
 	PortBindings    []PortBindingOptions  `json:"port_bindings,omitempty"`
+	Vsock           []VsockRouteOptions   `json:"vsock,omitempty"`
 	Network         *NetworkOptions       `json:"network,omitempty"`
 	Proxy           *OutboundProxyOptions `json:"proxy,omitempty"`
 	Secrets         []SecretOptions       `json:"secrets,omitempty"`
@@ -1614,39 +1616,62 @@ type RootDiskSpec struct {
 
 // MountSpec describes a volume mount for a sandbox.
 type MountSpec struct {
-	Bind               string `json:"bind,omitempty"`
-	Named              string `json:"named,omitempty"`
-	NamedMode          string `json:"named_mode,omitempty"`
-	NamedKind          string `json:"named_kind,omitempty"`
-	Tmpfs              bool   `json:"tmpfs,omitempty"`
-	Disk               string `json:"disk,omitempty"`
-	Format             string `json:"format,omitempty"`
-	Fstype             string `json:"fstype,omitempty"`
-	Readonly           bool   `json:"readonly,omitempty"`
-	Noexec             bool   `json:"noexec,omitempty"`
-	Nosuid             bool   `json:"nosuid,omitempty"`
-	Nodev              bool   `json:"nodev,omitempty"`
-	SizeMiB            uint32 `json:"size_mib,omitempty"`
-	QuotaMiB           uint32 `json:"quota_mib,omitempty"`
-	StatVirtualization string `json:"stat_virtualization,omitempty"`
-	HostPermissions    string `json:"host_permissions,omitempty"`
+	Bind               string  `json:"bind,omitempty"`
+	Named              string  `json:"named,omitempty"`
+	NamedMode          string  `json:"named_mode,omitempty"`
+	NamedKind          string  `json:"named_kind,omitempty"`
+	Tmpfs              bool    `json:"tmpfs,omitempty"`
+	Disk               string  `json:"disk,omitempty"`
+	Format             string  `json:"format,omitempty"`
+	Fstype             string  `json:"fstype,omitempty"`
+	Readonly           bool    `json:"readonly,omitempty"`
+	Noexec             bool    `json:"noexec,omitempty"`
+	Nosuid             bool    `json:"nosuid,omitempty"`
+	Nodev              bool    `json:"nodev,omitempty"`
+	SizeMiB            uint32  `json:"size_mib,omitempty"`
+	QuotaMiB           uint32  `json:"quota_mib,omitempty"`
+	StatVirtualization string  `json:"stat_virtualization,omitempty"`
+	HostPermissions    string  `json:"host_permissions,omitempty"`
+	OverrideUid        *uint32 `json:"override_uid,omitempty"`
+	OverrideGid        *uint32 `json:"override_gid,omitempty"`
 }
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy        *CustomNetworkPolicy `json:"custom_policy,omitempty"`
-	DNS                 *DNSOptions          `json:"dns,omitempty"`
-	DNSRebindProtection *bool                `json:"dns_rebind_protection,omitempty"`
-	DenyDomains         []string             `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes  []string             `json:"deny_domain_suffixes,omitempty"`
-	TLS                 *TLSOptions          `json:"tls,omitempty"`
-	Ports               map[uint16]uint16    `json:"ports,omitempty"`
-	PortBindings        []PortBindingOptions `json:"port_bindings,omitempty"`
-	IPv4Pool            string               `json:"ipv4_pool,omitempty"`
-	IPv6Pool            string               `json:"ipv6_pool,omitempty"`
-	MaxConnections      *uint                `json:"max_connections,omitempty"`
-	OnSecretViolation   string               `json:"on_secret_violation,omitempty"`
-	TrustHostCAs        *bool                `json:"trust_host_cas,omitempty"`
+	CustomPolicy        *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                 *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains         []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes  []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                 *TLSOptions                `json:"tls,omitempty"`
+	Ports               map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings        []PortBindingOptions       `json:"port_bindings,omitempty"`
+	IPv4Pool            string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool            string                     `json:"ipv6_pool,omitempty"`
+	MaxConnections      *uint                      `json:"max_connections,omitempty"`
+	RateLimiter         *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	OnSecretViolation   string                     `json:"on_secret_violation,omitempty"`
+	TrustHostCAs        *bool                      `json:"trust_host_cas,omitempty"`
+}
+
+// RateLimiterOptions limits one traffic direction; a nil bucket leaves that
+// dimension unlimited.
+type RateLimiterOptions struct {
+	Bandwidth *TokenBucketOptions `json:"bandwidth,omitempty"`
+	Ops       *TokenBucketOptions `json:"ops,omitempty"`
+}
+
+// NetworkRateLimiterOptions groups local network limits by direction.
+type NetworkRateLimiterOptions struct {
+	Egress  *RateLimiterOptions `json:"egress,omitempty"`
+	Ingress *RateLimiterOptions `json:"ingress,omitempty"`
+}
+
+// TokenBucketOptions is the JSON representation of a token bucket.
+type TokenBucketOptions struct {
+	Size         uint64 `json:"size"`
+	RefillTimeMs uint64 `json:"refill_time_ms"`
+	OneTimeBurst uint64 `json:"one_time_burst,omitempty"`
 }
 
 // OutboundProxyOptions is the JSON representation of an outbound proxy.
@@ -1662,6 +1687,13 @@ type PortBindingOptions struct {
 	HostPort  uint16 `json:"host_port"`
 	GuestPort uint16 `json:"guest_port"`
 	Protocol  string `json:"protocol,omitempty"`
+}
+
+// VsockRouteOptions exposes one host Unix socket on a host-CID vsock port.
+type VsockRouteOptions struct {
+	HostSocket string `json:"host_socket"`
+	Port       uint32 `json:"port"`
+	SocketType string `json:"socket_type,omitempty"`
 }
 
 // DNSOptions configures the in-VM DNS proxy.
@@ -2458,9 +2490,10 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResul
 
 // SSHClientOptions is the FFI wire shape for a native SSH client connection.
 type SSHClientOptions struct {
-	User string `json:"user,omitempty"`
-	Term string `json:"term,omitempty"`
-	SFTP *bool  `json:"sftp,omitempty"`
+	User                  string  `json:"user,omitempty"`
+	Term                  string  `json:"term,omitempty"`
+	SFTP                  *bool   `json:"sftp,omitempty"`
+	InactivityTimeoutSecs *uint64 `json:"inactivity_timeout_secs,omitempty"`
 }
 
 // SSHExecOptions is the FFI wire shape for an SSH exec request.
@@ -2476,10 +2509,11 @@ type SSHAttachOptions struct {
 
 // SSHServerOptions is the FFI wire shape for preparing an SSH server endpoint.
 type SSHServerOptions struct {
-	HostKeyPath        string `json:"host_key_path,omitempty"`
-	AuthorizedKeysPath string `json:"authorized_keys_path,omitempty"`
-	User               string `json:"user,omitempty"`
-	SFTP               *bool  `json:"sftp,omitempty"`
+	HostKeyPath           string  `json:"host_key_path,omitempty"`
+	AuthorizedKeysPath    string  `json:"authorized_keys_path,omitempty"`
+	User                  string  `json:"user,omitempty"`
+	SFTP                  *bool   `json:"sftp,omitempty"`
+	InactivityTimeoutSecs *uint64 `json:"inactivity_timeout_secs,omitempty"`
 }
 
 // SSHOutput is the FFI-decoded output from an SSH exec request.
@@ -4546,24 +4580,27 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
-	Path                     string            `json:"path"`
-	Digest                   string            `json:"digest"`
-	SizeBytes                *uint64           `json:"size_bytes"`
-	ImageRef                 string            `json:"image_ref"`
-	ImageManifestDigest      string            `json:"image_manifest_digest"`
-	Scope                    string            `json:"scope"`
-	StateKind                string            `json:"state_kind"`
-	Format                   *string           `json:"format"`
-	Fstype                   *string           `json:"fstype"`
-	UpperFile                *string           `json:"upper_file"`
-	UpperIntegrityAlgorithm  *string           `json:"upper_integrity_algorithm"`
-	UpperIntegrityDigest     *string           `json:"upper_integrity_digest"`
-	CheckpointID             *string           `json:"checkpoint_id"`
-	CheckpointManifestDigest *string           `json:"checkpoint_manifest_digest"`
-	Parent                   *string           `json:"parent"`
-	CreatedAt                string            `json:"created_at"`
-	Labels                   map[string]string `json:"labels"`
-	SourceSandbox            *string           `json:"source_sandbox"`
+	Path                      string            `json:"path"`
+	Digest                    string            `json:"digest"`
+	SizeBytes                 *uint64           `json:"size_bytes"`
+	ImageRef                  string            `json:"image_ref"`
+	ImageManifestDigest       string            `json:"image_manifest_digest"`
+	Scope                     string            `json:"scope"`
+	StateKind                 string            `json:"state_kind"`
+	Format                    *string           `json:"format"`
+	Fstype                    *string           `json:"fstype"`
+	UpperFile                 *string           `json:"upper_file"`
+	UpperIntegrityAlgorithm   *string           `json:"upper_integrity_algorithm"`
+	UpperIntegrityDigest      *string           `json:"upper_integrity_digest"`
+	UpperIntegrityRoot        *string           `json:"upper_integrity_root"`
+	UpperIntegrityLogicalSize *uint64           `json:"upper_integrity_logical_size"`
+	UpperIntegrityLeafSize    *uint32           `json:"upper_integrity_leaf_size"`
+	CheckpointID              *string           `json:"checkpoint_id"`
+	CheckpointManifestDigest  *string           `json:"checkpoint_manifest_digest"`
+	Parent                    *string           `json:"parent"`
+	CreatedAt                 string            `json:"created_at"`
+	Labels                    map[string]string `json:"labels"`
+	SourceSandbox             *string           `json:"source_sandbox"`
 }
 
 type SnapshotHandleInfo struct {

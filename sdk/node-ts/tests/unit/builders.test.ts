@@ -305,6 +305,31 @@ describe("MountBuilder", () => {
     expect(() => builder.build()).toThrow(/Off cannot be combined with/);
   });
 
+  it("preserves an explicit mount owner including root and max IDs", () => {
+    expect(new MountBuilder("/data").bind("/host").owner(0, 0).build()).toMatchObject({
+      overrideUid: 0,
+      overrideGid: 0,
+    });
+    expect(
+      new MountBuilder("/max")
+        .bind("/host")
+        .owner(0xffffffff, 0xffffffff)
+        .build(),
+    ).toMatchObject({ overrideUid: 0xffffffff, overrideGid: 0xffffffff });
+  });
+
+  it.each([-1, 1.5, 0x100000000, Number.NaN, Infinity, -Infinity])(
+    "rejects invalid mount owner ID %s at the JavaScript boundary",
+    (id) => {
+      expect(() => new MountBuilder("/data").bind("/host").owner(id, 1000)).toThrow(
+        /mount owner uid must be an integer/,
+      );
+      expect(() => new MountBuilder("/data").bind("/host").owner(1000, id)).toThrow(
+        /mount owner gid must be an integer/,
+      );
+    },
+  );
+
   it("rejects commas in bind host paths at build time", () => {
     const builder = new MountBuilder("/data").bind("/host/with,comma");
     expect(() => builder.build()).toThrow(/must not contain ','/);
@@ -340,6 +365,7 @@ describe("SandboxBuilder.build", () => {
       .cpus(2)
       .maxCpus(8)
       .cpuPlacement("spread")
+      .placementProfile("latency")
       .thp("always")
       .build();
     expect((cfg.resources as { memoryMib: number }).memoryMib).toBe(2048);
@@ -349,6 +375,9 @@ describe("SandboxBuilder.build", () => {
     expect((cfg.resources as { cpuPlacement: string }).cpuPlacement).toBe(
       "spread",
     );
+    expect(
+      (cfg.resources as { placementProfile: string }).placementProfile,
+    ).toBe("latency");
     expect((cfg.resources as { thp: string }).thp).toBe("always");
   });
 
@@ -444,6 +473,22 @@ describe("SandboxBuilder.build", () => {
       .build();
     expect((cleared.runtime as { entrypoint: string[] }).entrypoint).toEqual([]);
     expect((cleared.runtime as { cmd: string[] }).cmd).toEqual([]);
+  });
+
+  it("collects stream and datagram vsock routes", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .vsock("/run/host-api.sock", 5000)
+      .vsockDgram("/run/events.sock", 5001)
+      .build();
+    const routes = (cfg.vsock as {
+      routes: Array<{ hostSocket: string; port: number; socketType: string }>;
+    }).routes;
+
+    expect(routes).toEqual([
+      { hostSocket: "/run/host-api.sock", port: 5000, socketType: "stream" },
+      { hostSocket: "/run/events.sock", port: 5001, socketType: "dgram" },
+    ]);
   });
 
   it("keeps libkrunfwPath as a chainable compatibility alias", async () => {
@@ -651,6 +696,75 @@ describe("SandboxBuilder outbound proxy", () => {
         p.socks4("127.0.0.1:1080").userId(""),
       ),
     ).toThrow(/invalid SOCKS4 user ID/);
+  });
+});
+
+describe("NetworkBuilder rate limiters", () => {
+  it("maps bucket values through build()", () => {
+    const cfg = new NetworkBuilder()
+      .rateLimiter((r) =>
+        r
+          .egress((r) =>
+            r
+              .bandwidth(1_048_576, 1_000)
+              .bandwidthBurst(524_288)
+              .ops(1_000, 1_000)
+              .opsBurst(500),
+          )
+          .ingress((r) => r.ops(100, 500)),
+      )
+      .build() as {
+        rateLimiter: {
+          egress: {
+            bandwidth: { size: number; refillTimeMs: number; oneTimeBurst: number };
+            ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
+          };
+          ingress: {
+            bandwidth?: unknown;
+            ops: { size: number; refillTimeMs: number; oneTimeBurst: number };
+          };
+        };
+      };
+
+    expect(cfg.rateLimiter.egress.bandwidth).toMatchObject({
+      size: 1_048_576,
+      refillTimeMs: 1_000,
+      oneTimeBurst: 524_288,
+    });
+    expect(cfg.rateLimiter.egress.ops).toMatchObject({
+      size: 1_000,
+      refillTimeMs: 1_000,
+      oneTimeBurst: 500,
+    });
+    expect(cfg.rateLimiter.ingress.bandwidth).toBeUndefined();
+    expect(cfg.rateLimiter.ingress.ops).toMatchObject({
+      size: 100,
+      refillTimeMs: 500,
+      oneTimeBurst: 0,
+    });
+  });
+
+  it("defaults to unlimited when not configured", () => {
+    const cfg = new NetworkBuilder().build() as {
+      rateLimiter: unknown;
+    };
+
+    expect(cfg.rateLimiter).toBeNull();
+  });
+
+  it("rejects a burst without its bucket at build()", () => {
+    expect(() =>
+      new NetworkBuilder().rateLimiter((r) => r.egress((r) => r.bandwidthBurst(1_024))).build()
+    ).toThrow(/bandwidth_burst requires the bandwidth bucket/);
+  });
+
+  it("rejects fractional and negative bucket values", () => {
+    expect(() =>
+      new NetworkBuilder().rateLimiter((r) => r.egress((r) => r.bandwidth(1.5, 1_000))),
+    ).toThrow(/non-negative integer/);
+    expect(() =>
+      new NetworkBuilder().rateLimiter((r) => r.ingress((r) => r.ops(-1, 1_000))),
+    ).toThrow(/non-negative integer/);
   });
 });
 

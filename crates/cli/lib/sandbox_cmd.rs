@@ -55,6 +55,11 @@ pub struct SandboxArgs {
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
 
+    /// Inherited descriptor owning this sandbox's lifecycle lock.
+    #[cfg(unix)]
+    #[arg(long = "lifecycle-lock-fd", hide = true)]
+    pub lifecycle_lock_fd: Option<i32>,
+
     /// Windows named pipe used to write startup JSON.
     #[cfg(windows)]
     #[arg(long = "startup-pipe", hide = true)]
@@ -137,6 +142,33 @@ pub fn run(args: SandboxArgs) -> ! {
             std::process::exit(2);
         }
     };
+    let run_dir = launch_run_dir(&launch);
+    #[cfg(unix)]
+    let lifecycle_guard = match args.lifecycle_lock_fd {
+        Some(fd) => match lifecycle_guard_from_fd(fd) {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+        },
+        None => {
+            match microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let lifecycle_guard =
+        microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, &args.sandbox_name)
+            .unwrap_or_else(|err| {
+                eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
+                std::process::exit(2);
+            });
     let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
@@ -171,6 +203,14 @@ pub fn run(args: SandboxArgs) -> ! {
     } else {
         None
     };
+    if let Some(profile_name) = &launch.placement_profile_name
+        && launch.placement_profile.is_none()
+    {
+        eprintln!(
+            "placement profile `{profile_name}` is not defined in runtime.placement_profiles"
+        );
+        std::process::exit(2);
+    }
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
@@ -182,6 +222,8 @@ pub fn run(args: SandboxArgs) -> ! {
             .unwrap_or(args.memory_mib)
             .max(args.memory_mib),
         cpu_placement: launch.cpu_placement,
+        placement_profile_name: launch.placement_profile_name,
+        placement_profile: launch.placement_profile,
         block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
@@ -201,11 +243,11 @@ pub fn run(args: SandboxArgs) -> ! {
         rootfs_disk_readonly: launch.rootfs.disk_readonly,
         mounts: launch.mounts,
         disks,
+        vsock: launch.vsock,
         #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
-        env: launch.env,
-        workdir: launch.workdir,
+        bootstrap: launch.bootstrap,
         exec_path: launch.exec_path,
         exec_args: launch.exec_args,
         #[cfg(feature = "net")]
@@ -225,6 +267,8 @@ pub fn run(args: SandboxArgs) -> ! {
         log_dir: launch.log_dir,
         runtime_dir: launch.runtime_dir,
         sandboxes_dir: launch.sandboxes_dir,
+        run_dir,
+        lifecycle_guard,
         cpu_lease_dir: launch.cpu_lease_dir,
         writeback_lease_dir: launch.writeback_lease_dir,
         block_writeback_pool_bytes: launch.block_writeback_pool_bytes,
@@ -249,6 +293,31 @@ pub fn run(args: SandboxArgs) -> ! {
     };
 
     microsandbox_runtime::vm::enter(config)
+}
+
+/// Resolve the runtime artifact root across launch-config generations.
+fn launch_run_dir(launch: &LaunchConfig) -> PathBuf {
+    if !launch.run_dir.as_os_str().is_empty() {
+        return launch.run_dir.clone();
+    }
+
+    // Older launchers bind `<run>/agent/<hash>.sock` and do not serialize a
+    // run root. Recover it from that stable legacy endpoint when possible.
+    if let Some(agent_dir) = launch.agent_sock.parent()
+        && agent_dir.file_name().is_some_and(|name| name == "agent")
+        && let Some(run_dir) = agent_dir.parent()
+    {
+        return run_dir.to_path_buf();
+    }
+
+    // The pre-hash deep-path fallback lives below the sandbox root, so it
+    // carries no run-root information. Existing homes colocate `run` beside
+    // `sandboxes`; this inference is only used for old launch payloads.
+    launch
+        .sandboxes_dir
+        .parent()
+        .map(|home| home.join(microsandbox_utils::RUN_SUBDIR))
+        .unwrap_or_default()
 }
 
 /// Load the JSON [`LaunchConfig`] for this sandbox from the inherited config
@@ -310,7 +379,40 @@ fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
 }
 
 #[cfg(unix)]
+fn lifecycle_guard_from_fd(
+    fd: i32,
+) -> Result<microsandbox_runtime::ipc::SandboxLifecycleGuard, String> {
+    validate_open_fd(
+        fd,
+        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+        "lifecycle-lock-fd",
+    )?;
+    let file = unsafe { File::from_raw_fd(fd) };
+    Ok(microsandbox_runtime::ipc::SandboxLifecycleGuard::from_inherited_file(file))
+}
+
+#[cfg(unix)]
 fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
+    validate_open_fd(fd, expected_fd, arg_name)?;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "invalid --{arg_name} {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
+    if file_type != libc::S_IFIFO as libc::mode_t {
+        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_open_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), String> {
     if fd < 0 {
         return Err(format!(
             "invalid --{arg_name}: fd must be non-negative, got {fd}"
@@ -330,30 +432,17 @@ fn validate_pipe_fd(fd: i32, expected_fd: i32, arg_name: &str) -> Result<(), Str
         ));
     }
 
-    let mut stat = MaybeUninit::<libc::stat>::uninit();
-    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-        return Err(format!(
-            "invalid --{arg_name} {fd}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let stat = unsafe { stat.assume_init() };
-    let file_type = stat.st_mode & libc::S_IFMT as libc::mode_t;
-    if file_type != libc::S_IFIFO as libc::mode_t {
-        return Err(format!("invalid --{arg_name} {fd}: fd is not a pipe"));
-    }
-
     Ok(())
 }
 
 /// Parse `--disk id:host_path:format[:ro]` entries into typed specs.
 ///
-/// `guest` and `fstype` are not in this arg — they travel in the
-/// `MSB_DISK_MOUNTS` env var and are consumed by agentd, so the runtime
-/// only needs what `DiskBuilder` will set.
+/// `guest` and `fstype` are not in this arg. They travel in the typed guest
+/// bootstrap consumed by agentd, so the runtime only needs what `DiskBuilder`
+/// will set.
 ///
-/// Malformed entries are hard errors so the host-side `MSB_DISK_MOUNTS`
-/// handoff cannot mention a disk that the runtime silently failed to attach.
+/// Malformed entries are hard errors so bootstrap cannot mention a disk that
+/// the runtime silently failed to attach.
 fn parse_disk_args(entries: &[String]) -> Result<Vec<DiskMountSpec>, String> {
     entries
         .iter()
@@ -559,6 +648,8 @@ mod tests {
             parent_watch_fd: None,
             #[cfg(unix)]
             startup_fd: None,
+            #[cfg(unix)]
+            lifecycle_lock_fd: None,
             #[cfg(windows)]
             startup_pipe: None,
             forward_output: false,
@@ -574,11 +665,18 @@ mod tests {
 
     #[test]
     fn test_load_launch_config_from_file() {
+        use microsandbox_protocol::bootstrap::{BootstrapEnvVar, GuestBootstrap};
         use std::io::Write;
 
         let launch = LaunchConfig {
             db_path: PathBuf::from("/tmp/x.db"),
-            env: vec!["TOKEN=secret".to_string()],
+            bootstrap: GuestBootstrap {
+                default_env: vec![BootstrapEnvVar {
+                    key: "TOKEN".to_string(),
+                    value: "secret".to_string(),
+                }],
+                ..GuestBootstrap::default()
+            },
             block_writeback_limit_bytes: Some(512 * 1024 * 1024),
             block_writeback_pool_bytes: Some(4 * 1024 * 1024 * 1024),
             writeback_lease_dir: PathBuf::from("/tmp/writeback-leases"),
@@ -592,7 +690,13 @@ mod tests {
         let loaded = load_launch_config(&args).unwrap();
 
         assert_eq!(loaded.db_path, PathBuf::from("/tmp/x.db"));
-        assert_eq!(loaded.env, vec!["TOKEN=secret".to_string()]);
+        assert_eq!(
+            loaded.bootstrap.default_env,
+            vec![BootstrapEnvVar {
+                key: "TOKEN".to_string(),
+                value: "secret".to_string(),
+            }]
+        );
         assert_eq!(loaded.block_writeback_limit_bytes, Some(512 * 1024 * 1024));
         assert_eq!(
             loaded.block_writeback_pool_bytes,
@@ -605,13 +709,49 @@ mod tests {
     }
 
     #[test]
+    fn test_old_launch_config_without_run_dir_remains_readable() {
+        use std::io::Write;
+
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/run/agent/legacy.sock"),
+            ..Default::default()
+        };
+        let mut value = serde_json::to_value(&launch).unwrap();
+        value.as_object_mut().unwrap().remove("run_dir");
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        let args = args_with(None, Some(file.path().to_path_buf()));
+        let loaded = load_launch_config(&args).unwrap();
+
+        assert!(loaded.run_dir.as_os_str().is_empty());
+        assert_eq!(launch_run_dir(&loaded), PathBuf::from("/tmp/msb/run"));
+    }
+
+    #[test]
+    fn test_old_fallback_launch_config_infers_run_dir_from_sandbox_root() {
+        let launch = LaunchConfig {
+            sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
+            agent_sock: PathBuf::from("/tmp/msb/sandboxes/demo/runtime/agent.sock"),
+            ..Default::default()
+        };
+
+        assert_eq!(launch_run_dir(&launch), PathBuf::from("/tmp/msb/run"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn test_load_launch_config_from_fd() {
         use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::IntoRawFd;
 
         let launch = LaunchConfig {
-            workdir: Some(PathBuf::from("/srv")),
+            bootstrap: microsandbox_protocol::bootstrap::GuestBootstrap {
+                default_cwd: Some("/srv".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut file = tempfile::tempfile().unwrap();
@@ -623,7 +763,7 @@ mod tests {
         let args = args_with(Some(fd), None);
         let loaded = load_launch_config(&args).unwrap();
 
-        assert_eq!(loaded.workdir, Some(PathBuf::from("/srv")));
+        assert_eq!(loaded.bootstrap.default_cwd.as_deref(), Some("/srv"));
     }
 
     #[test]

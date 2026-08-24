@@ -809,6 +809,10 @@ fn default_port_protocol() -> String {
     "tcp".into()
 }
 
+fn default_vsock_socket_type() -> String {
+    "stream".into()
+}
+
 /// Custom policy. Parity-aligned with Node/Python: `default_egress` and
 /// `default_ingress` are the asymmetric default actions. Empty defaults to
 /// deny egress / allow ingress (matching the default public profile).
@@ -860,6 +864,31 @@ struct DnsOpts {
     query_timeout_ms: Option<u64>,
 }
 
+/// Rate limiter for one traffic direction. A missing bucket leaves that
+/// dimension unlimited.
+#[derive(Clone, serde::Deserialize)]
+struct RateLimiterOpts {
+    bandwidth: Option<TokenBucketOpts>,
+    ops: Option<TokenBucketOpts>,
+}
+
+/// Egress and ingress rate limiters for the local network.
+#[derive(Clone, serde::Deserialize)]
+struct NetworkRateLimiterOpts {
+    egress: Option<RateLimiterOpts>,
+    ingress: Option<RateLimiterOpts>,
+}
+
+/// Token bucket: `size` tokens (bytes or frames) refilled every
+/// `refill_time_ms`, plus an optional startup-only burst.
+#[derive(Clone, serde::Deserialize)]
+struct TokenBucketOpts {
+    size: u64,
+    refill_time_ms: u64,
+    #[serde(default)]
+    one_time_burst: u64,
+}
+
 #[derive(serde::Deserialize, Default)]
 struct NetworkOpts {
     /// Removed preset field retained only to return migration guidance instead
@@ -890,6 +919,8 @@ struct NetworkOpts {
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
     max_connections: Option<usize>,
+    /// Local egress and ingress rate limiters.
+    rate_limiter: Option<NetworkRateLimiterOpts>,
     /// Sandbox-wide secret violation action: "block", "block-and-log",
     /// "block-and-terminate".
     on_secret_violation: Option<String>,
@@ -987,6 +1018,7 @@ struct SandboxCreateOpts {
     max_memory_mib: Option<u32>,
     max_cpus: Option<u8>,
     cpu_placement: Option<String>,
+    placement_profile: Option<String>,
     thp: Option<String>,
     workdir: Option<String>,
     shell: Option<String>,
@@ -1047,6 +1079,9 @@ struct SandboxCreateOpts {
     /// Top-level port bindings with explicit bind addresses.
     #[serde(default)]
     port_bindings: Vec<PortBindingOpts>,
+    /// Guest-to-host virtio-vsock routes backed by host Unix sockets.
+    #[serde(default)]
+    vsock: Vec<VsockRouteOpts>,
     #[serde(default)]
     secrets: Vec<SecretOpts>,
     #[serde(default)]
@@ -1074,6 +1109,14 @@ struct PortBindingOpts {
     guest_port: u16,
     #[serde(default = "default_port_protocol")]
     protocol: String,
+}
+
+#[derive(serde::Deserialize)]
+struct VsockRouteOpts {
+    host_socket: String,
+    port: u32,
+    #[serde(default = "default_vsock_socket_type")]
+    socket_type: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1150,6 +1193,12 @@ struct MountSpec {
     /// Per-mount host-permission policy ("private" | "mirror").
     /// Only valid for bind / named mounts.
     host_permissions: Option<String>,
+    /// Guest uid presented for host files with no per-file stat override.
+    /// Must be set together with `override_gid`. Only valid for bind / named mounts.
+    override_uid: Option<u32>,
+    /// Guest gid presented for host files with no per-file stat override.
+    /// Must be set together with `override_uid`. Only valid for bind / named mounts.
+    override_gid: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -1351,6 +1400,23 @@ fn apply_network(
         builder = builder.network(move |n| n.max_connections(max));
     }
 
+    // Rate limiters. Validation (empty limiter, zero size/refill, burst
+    // without a bucket) happens in the network builder's build step.
+    if let Some(ref rate_limiter) = net.rate_limiter {
+        let rate_limiter = rate_limiter.clone();
+        builder = builder.network(move |n| {
+            n.rate_limiter(move |mut r| {
+                if let Some(ref limiter) = rate_limiter.egress {
+                    r = r.egress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                if let Some(ref limiter) = rate_limiter.ingress {
+                    r = r.ingress(|direction| apply_rate_limiter(direction, limiter));
+                }
+                r
+            })
+        });
+    }
+
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
@@ -1396,6 +1462,27 @@ fn apply_port_binding(
             ));
         }
     })
+}
+
+/// Copy deserialized bucket values onto a rate limiter builder. Bursts are
+/// only forwarded when non-zero so an absent JSON field stays "no burst".
+fn apply_rate_limiter(
+    mut r: microsandbox_network::builder::RateLimiterBuilder,
+    opts: &RateLimiterOpts,
+) -> microsandbox_network::builder::RateLimiterBuilder {
+    if let Some(ref b) = opts.bandwidth {
+        r = r.bandwidth(b.size, Duration::from_millis(b.refill_time_ms));
+        if b.one_time_burst > 0 {
+            r = r.bandwidth_burst(b.one_time_burst);
+        }
+    }
+    if let Some(ref b) = opts.ops {
+        r = r.ops(b.size, Duration::from_millis(b.refill_time_ms));
+        if b.one_time_burst > 0 {
+            r = r.ops_burst(b.one_time_burst);
+        }
+    }
+    r
 }
 
 /// Resolve a JSON destination string into the typed enum. Supports the
@@ -1832,6 +1919,8 @@ fn apply_volume(
     let nodev = m.nodev;
     let size_mib = m.size_mib;
     let quota_mib = m.quota_mib;
+    let override_uid = m.override_uid;
+    let override_gid = m.override_gid;
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
 
@@ -1871,6 +1960,16 @@ fn apply_volume(
     if quota_mib.is_some() && bind.is_none() && named.is_none() {
         return Err(FfiError::invalid_argument(
             "quota_mib is only valid for bind mounts or named volume provisioning",
+        ));
+    }
+    if override_uid.is_some() != override_gid.is_some() {
+        return Err(FfiError::invalid_argument(
+            "override_uid and override_gid must be specified together",
+        ));
+    }
+    if override_uid.is_some() && bind.is_none() && named.is_none() {
+        return Err(FfiError::invalid_argument(
+            "override_uid/override_gid are only valid for bind or named mounts",
         ));
     }
 
@@ -1939,6 +2038,9 @@ fn apply_volume(
         }
         if let Some(p) = host_perms {
             mb = mb.host_permissions(p);
+        }
+        if let (Some(uid), Some(gid)) = (override_uid, override_gid) {
+            mb = mb.owner(uid, gid);
         }
         mb
     }))
@@ -2113,6 +2215,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     .map_err(FfiError::invalid_argument)?;
                 builder = builder.cpu_placement(policy);
             }
+            if let Some(placement_profile) = opts.placement_profile {
+                builder = builder.placement_profile(placement_profile);
+            }
             if let Some(thp) = opts.thp {
                 let policy = thp
                     .parse::<microsandbox::sandbox::TransparentHugePagePolicy>()
@@ -2216,6 +2321,18 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             for port in &opts.port_bindings {
                 builder = apply_port_binding(builder, port)?;
+            }
+            for route in opts.vsock {
+                builder = match route.socket_type.as_str() {
+                    "" | "stream" => builder.vsock(route.host_socket, route.port),
+                    "dgram" => builder.vsock_dgram(route.host_socket, route.port),
+                    other => {
+                        return Err(FfiError::new(
+                            error_kind::INVALID_CONFIG,
+                            format!("invalid vsock socket type: {other}"),
+                        ));
+                    }
+                };
             }
             // Network (policy, DNS, TLS, ports-in-network).
             if let Some(ref net) = opts.network {
@@ -3214,6 +3331,7 @@ struct SshClientOpts {
     user: Option<String>,
     term: Option<String>,
     sftp: Option<bool>,
+    inactivity_timeout_secs: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -3222,6 +3340,7 @@ struct SshServerOpts {
     authorized_keys_path: Option<PathBuf>,
     user: Option<String>,
     sftp: Option<bool>,
+    inactivity_timeout_secs: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -3261,6 +3380,9 @@ pub unsafe extern "C" fn msb_sandbox_ssh_connect(
                     }
                     if let Some(sftp) = opts.sftp {
                         builder = builder.sftp(sftp);
+                    }
+                    if let Some(timeout_secs) = opts.inactivity_timeout_secs {
+                        builder = builder.inactivity_timeout(Duration::from_secs(timeout_secs));
                     }
                     builder
                 })
@@ -3304,6 +3426,9 @@ pub unsafe extern "C" fn msb_sandbox_ssh_server(
                     }
                     if let Some(sftp) = opts.sftp {
                         builder = builder.sftp(sftp);
+                    }
+                    if let Some(timeout_secs) = opts.inactivity_timeout_secs {
+                        builder = builder.inactivity_timeout(Duration::from_secs(timeout_secs));
                     }
                     builder
                 })
@@ -5569,21 +5694,41 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         upper_file,
         upper_integrity_algorithm,
         upper_integrity_digest,
+        upper_integrity_root,
+        upper_integrity_logical_size,
+        upper_integrity_leaf_size,
         checkpoint_id,
         checkpoint_manifest_digest,
     ) = match &manifest.state {
-        microsandbox::snapshot::SnapshotState::File(state) => (
-            "file",
-            Some(snapshot_format_str(state.format)),
-            Some(state.fstype.as_str()),
-            Some(state.upper.file.as_str()),
-            Some(state.upper.integrity.algorithm.as_str()),
-            Some(state.upper.integrity.digest.as_str()),
-            None,
-            None,
-        ),
+        microsandbox::snapshot::SnapshotState::File(state) => {
+            let integrity = state.upper.integrity.as_ref();
+            let (root, logical_size, leaf_size) = match integrity {
+                Some(microsandbox::UpperIntegrity::FileMerkleBlake3V1 {
+                    root,
+                    logical_size,
+                    leaf_size,
+                }) => (Some(root.as_str()), Some(*logical_size), Some(*leaf_size)),
+                _ => (None, None, None),
+            };
+            (
+                "file",
+                Some(snapshot_format_str(state.format)),
+                Some(state.fstype.as_str()),
+                Some(state.upper.file.as_str()),
+                integrity.map(microsandbox::UpperIntegrity::algorithm),
+                integrity.map(microsandbox::UpperIntegrity::value),
+                root,
+                logical_size,
+                leaf_size,
+                None,
+                None,
+            )
+        }
         microsandbox::snapshot::SnapshotState::Checkpoint(state) => (
             "checkpoint",
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -5606,6 +5751,9 @@ fn snapshot_json(s: &Snapshot) -> serde_json::Value {
         "upper_file": upper_file,
         "upper_integrity_algorithm": upper_integrity_algorithm,
         "upper_integrity_digest": upper_integrity_digest,
+        "upper_integrity_root": upper_integrity_root,
+        "upper_integrity_logical_size": upper_integrity_logical_size,
+        "upper_integrity_leaf_size": upper_integrity_leaf_size,
         "checkpoint_id": checkpoint_id,
         "checkpoint_manifest_digest": checkpoint_manifest_digest,
         "parent": manifest.parent,
@@ -5638,6 +5786,7 @@ fn snapshot_handle_json(h: &microsandbox::SnapshotHandle) -> serde_json::Value {
 
 fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> serde_json::Value {
     let upper = match report.upper {
+        UpperVerifyStatus::NotRecorded => serde_json::json!({"kind":"not_recorded"}),
         UpperVerifyStatus::Verified { algorithm, digest } => {
             serde_json::json!({"kind":"verified","algorithm":algorithm,"digest":digest})
         }

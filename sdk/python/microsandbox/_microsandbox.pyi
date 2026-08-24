@@ -12,6 +12,7 @@ from microsandbox.types import (
     ExecEventType,
     ExecOptions,
     FsEntryKind,
+    HostPermissions,
     ImageArchiveFormat,
     ImageSource,
     InitConfig,
@@ -38,10 +39,12 @@ from microsandbox.types import (
     SnapshotFormat,
     SnapshotScope,
     SnapshotStateKind,
+    StatVirtualization,
     Stdin,
     ViolationAction,
     ViolationPolicy,
     VolumeKind,
+    VsockRoute,
 )
 
 class PyAgentClient:
@@ -118,6 +121,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,
@@ -172,6 +176,7 @@ class Sandbox:
         volumes: Mapping[str, MountConfig] | None = None,
         patches: Sequence[PatchConfig] | None = None,
         ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        vsock: Mapping[str, int] | Sequence[VsockRoute] | None = None,
         network: Network | None = None,
         secrets: Sequence[SecretEntry] | None = None,
         on_secret_violation: ViolationAction | ViolationPolicy | None = None,
@@ -458,6 +463,7 @@ class SandboxSshOps:
         user: str = "root",
         term: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshClient: ...
     async def prepare_server(
         self,
@@ -466,6 +472,7 @@ class SandboxSshOps:
         authorized_keys_path: str | os.PathLike[str] | None = None,
         user: str | None = None,
         sftp: bool = True,
+        inactivity_timeout: float | None = None,
     ) -> SshServer: ...
 
 class SshOutput:
@@ -614,6 +621,10 @@ class Volume:
         noexec: bool = False,
         nosuid: bool = False,
         nodev: bool = False,
+        stat_virtualization: StatVirtualization | None = None,
+        host_permissions: HostPermissions | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> MountConfig: ...
     @staticmethod
     def named(
@@ -627,6 +638,10 @@ class Volume:
         noexec: bool = False,
         nosuid: bool = False,
         nodev: bool = False,
+        stat_virtualization: StatVirtualization | None = None,
+        host_permissions: HostPermissions | None = None,
+        uid: int | None = None,
+        gid: int | None = None,
     ) -> MountConfig: ...
     @staticmethod
     def tmpfs(

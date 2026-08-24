@@ -79,6 +79,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		MaxMemoryMiB:      o.MaxMemoryMiB,
 		MaxCPUs:           o.MaxCPUs,
 		CPUPlacement:      string(o.CPUPlacement),
+		PlacementProfile:  o.PlacementProfile,
 		THP:               string(o.THP),
 		Workdir:           o.Workdir,
 		Shell:             o.Shell,
@@ -100,6 +101,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ports:             o.Ports,
 		PortsUDP:          o.PortsUDP,
 		PortBindings:      buildFFIPortBindings(o.PortBindings),
+		Vsock:             buildFFIVsockRoutes(o.Vsock),
 		RegistryInsecure:  o.RegistryInsecure,
 	}
 	if o.Entrypoint != nil {
@@ -150,7 +152,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	if len(o.Volumes) > 0 {
 		ffiOpts.Volumes = make(map[string]ffi.MountSpec, len(o.Volumes))
 		for guestPath, m := range o.Volumes {
-			ffiOpts.Volumes[guestPath] = ffi.MountSpec{
+			spec := ffi.MountSpec{
 				Bind:               m.Bind,
 				Named:              m.Named,
 				NamedMode:          m.NamedMode,
@@ -168,6 +170,11 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				StatVirtualization: string(m.StatVirtualization),
 				HostPermissions:    string(m.HostPermissions),
 			}
+			if m.Owner != nil {
+				uid, gid := m.Owner.UID, m.Owner.GID
+				spec.OverrideUid, spec.OverrideGid = &uid, &gid
+			}
+			ffiOpts.Volumes[guestPath] = spec
 		}
 	}
 
@@ -308,6 +315,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		IPv4Pool:            n.IPv4Pool,
 		IPv6Pool:            n.IPv6Pool,
 		MaxConnections:      n.MaxConnections,
+		RateLimiter:         buildFFINetworkRateLimiter(n.RateLimiter),
 		OnSecretViolation:   string(n.OnSecretViolation),
 		TrustHostCAs:        n.TrustHostCAs,
 	}
@@ -384,6 +392,44 @@ func buildFFIOutboundProxy(proxy *OutboundProxy) *ffi.OutboundProxyOptions {
 	}
 }
 
+func buildFFINetworkRateLimiter(l *NetworkRateLimiterConfig) *ffi.NetworkRateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.NetworkRateLimiterOptions{
+		Egress:  buildFFIRateLimiter(l.Egress),
+		Ingress: buildFFIRateLimiter(l.Ingress),
+	}
+}
+
+func buildFFIRateLimiter(l *RateLimiterConfig) *ffi.RateLimiterOptions {
+	if l == nil {
+		return nil
+	}
+	return &ffi.RateLimiterOptions{
+		Bandwidth: buildFFITokenBucket(l.Bandwidth),
+		Ops:       buildFFITokenBucket(l.Ops),
+	}
+}
+
+func buildFFITokenBucket(b *TokenBucketConfig) *ffi.TokenBucketOptions {
+	if b == nil {
+		return nil
+	}
+	// Keep invalid durations invalid on the wire so the Rust builder returns
+	// a configuration error. Casting a negative Milliseconds result directly
+	// to uint64 would otherwise turn it into an enormous valid interval.
+	var refillTimeMs uint64
+	if b.RefillTime >= time.Millisecond && b.RefillTime%time.Millisecond == 0 {
+		refillTimeMs = uint64(b.RefillTime / time.Millisecond)
+	}
+	return &ffi.TokenBucketOptions{
+		Size:         b.Size,
+		RefillTimeMs: refillTimeMs,
+		OneTimeBurst: b.OneTimeBurst,
+	}
+}
+
 func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 	out := make([]ffi.PortBindingOptions, 0, len(bindings))
 	for _, b := range bindings {
@@ -392,6 +438,18 @@ func buildFFIPortBindings(bindings []PortBinding) []ffi.PortBindingOptions {
 			HostPort:  b.HostPort,
 			GuestPort: b.GuestPort,
 			Protocol:  string(b.Protocol),
+		})
+	}
+	return out
+}
+
+func buildFFIVsockRoutes(routes []VsockRoute) []ffi.VsockRouteOptions {
+	out := make([]ffi.VsockRouteOptions, 0, len(routes))
+	for _, route := range routes {
+		out = append(out, ffi.VsockRouteOptions{
+			HostSocket: route.HostSocket,
+			Port:       route.Port,
+			SocketType: string(route.SocketType),
 		})
 	}
 	return out

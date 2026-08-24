@@ -58,7 +58,6 @@ use crate::{
 pub struct LocalBackend {
     config: Arc<LocalConfig>,
     db: OnceCell<DbPools>,
-    deployment_profile: Option<DeploymentProfile>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
 }
@@ -93,6 +92,7 @@ pub struct LocalBackendBuilder {
     disable_metrics_sample: Option<bool>,
     ca_certs: Option<Option<PathBuf>>,
     registry_hosts: Option<HashMap<String, RegistryEntry>>,
+    ssh_inactivity_timeout_secs: Option<u64>,
     log_level: Option<microsandbox_runtime::logging::LogLevel>,
     deployment_profile: Option<DeploymentProfile>,
 }
@@ -128,11 +128,10 @@ impl LocalBackend {
         selection_source: BackendSelectionSource,
         profile: Option<String>,
     ) -> Self {
-        let config = Arc::new(load_persisted_config_or_default().unwrap_or_default());
+        let config = load_persisted_config_or_default().unwrap_or_default();
         Self {
-            config,
+            config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile: None,
             selection_source,
             profile,
         }
@@ -230,7 +229,7 @@ impl LocalBackend {
     /// the backend means an embedding host can enforce its isolation model even
     /// when the incoming sandbox specification requests a weaker profile.
     pub(crate) fn apply_deployment_profile(&self, config: &mut SandboxConfig) {
-        let Some(profile) = self.deployment_profile else {
+        let Some(profile) = self.config.deployment_profile else {
             return;
         };
 
@@ -375,6 +374,14 @@ impl LocalBackendBuilder {
         self
     }
 
+    /// Override the default SSH inactivity timeout in seconds.
+    ///
+    /// Pass `0` to disable the timeout.
+    pub fn ssh_inactivity_timeout_secs(mut self, secs: u64) -> Self {
+        self.ssh_inactivity_timeout_secs = Some(secs);
+        self
+    }
+
     /// Override the runtime log level applied to SDK-spawned sandboxes.
     pub fn log_level(mut self, level: microsandbox_runtime::logging::LogLevel) -> Self {
         self.log_level = Some(level);
@@ -407,15 +414,28 @@ impl LocalBackendBuilder {
     /// This retains the programmatic overrides from the builder while avoiding
     /// filesystem or migration work during construction. It is useful for
     /// embedding runtimes that must finish a protocol handshake before touching
-    /// sandbox state.
+    /// sandbox state. Persisted-config read or parse errors fall back to hard-coded
+    /// defaults; use [`try_build_lazy`](Self::try_build_lazy) to propagate them.
     pub fn build_lazy(self) -> LocalBackend {
         let persisted = load_persisted_config_or_default().unwrap_or_default();
-        let deployment_profile = self.deployment_profile;
+        self.build_lazy_from(persisted)
+    }
+
+    /// Build a lazy `LocalBackend`, returning persisted-config read or parse errors.
+    ///
+    /// Unlike [`build_lazy`](Self::build_lazy), this constructor does not fall
+    /// back to hard-coded defaults when the configured file is unreadable or
+    /// invalid. The database still initializes only on first use.
+    pub fn try_build_lazy(self) -> MicrosandboxResult<LocalBackend> {
+        Ok(self.build_lazy_from(load_persisted_config_or_default()?))
+    }
+
+    /// Finish lazy construction from an already resolved persisted config.
+    fn build_lazy_from(self, persisted: LocalConfig) -> LocalBackend {
         let config = self.merge_into(persisted);
         LocalBackend {
             config: Arc::new(config),
             db: OnceCell::new(),
-            deployment_profile,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         }
@@ -443,8 +463,9 @@ impl LocalBackendBuilder {
             disable_metrics_sample,
             ca_certs,
             registry_hosts,
+            ssh_inactivity_timeout_secs,
             log_level,
-            deployment_profile: _,
+            deployment_profile,
         } = self;
 
         if let Some(home) = home {
@@ -452,6 +473,9 @@ impl LocalBackendBuilder {
         }
         if let Some(level) = log_level {
             base.log_level = Some(level);
+        }
+        if let Some(profile) = deployment_profile {
+            base.deployment_profile = Some(profile);
         }
 
         if let Some(v) = max_connections {
@@ -507,6 +531,9 @@ impl LocalBackendBuilder {
         }
         if let Some(v) = registry_hosts {
             base.registries.hosts = v;
+        }
+        if let Some(secs) = ssh_inactivity_timeout_secs {
+            base.ssh.inactivity_timeout_secs = secs;
         }
 
         base
@@ -798,9 +825,11 @@ mod tests {
     #[test]
     fn operator_deployment_profile_overrides_sandbox_request() {
         let backend = LocalBackend {
-            config: Arc::new(LocalConfig::default()),
+            config: Arc::new(LocalConfig {
+                deployment_profile: Some(DeploymentProfile::MultiTenant),
+                ..Default::default()
+            }),
             db: OnceCell::new(),
-            deployment_profile: Some(DeploymentProfile::MultiTenant),
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -821,7 +850,6 @@ mod tests {
         let backend = LocalBackend {
             config: Arc::new(LocalConfig::default()),
             db: OnceCell::new(),
-            deployment_profile: None,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
         };
@@ -873,6 +901,7 @@ mod tests {
             "maintenance_lease",
             "manifest",
             "manifest_layer",
+            "memory_allocation_node",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -1223,6 +1252,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn try_build_lazy_rejects_invalid_persisted_config() {
+        let _env_guard = crate::test_support::lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        std::fs::write(&config_path, "not json").unwrap();
+        let previous = std::env::var_os("MSB_CONFIG_PATH");
+
+        // SAFETY: every environment-mutating SDK unit test holds the shared lock.
+        unsafe { std::env::set_var("MSB_CONFIG_PATH", &config_path) };
+        let result = LocalBackend::builder().try_build_lazy();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MSB_CONFIG_PATH", value),
+                None => std::env::remove_var("MSB_CONFIG_PATH"),
+            }
+        }
+
+        let error = match result {
+            Ok(_) => panic!("invalid persisted config must fail lazy construction"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+    }
+
     /// `LocalBackendBuilder::build()` overlays builder overrides on top of
     /// the persisted config — values the builder didn't set must be
     /// preserved from the base. This test runs `merge_into` directly so it
@@ -1233,6 +1287,7 @@ mod tests {
         // wrote to ~/.microsandbox/config.json.
         let base = LocalConfig {
             log_level: Some(microsandbox_runtime::logging::LogLevel::Debug),
+            deployment_profile: Some(DeploymentProfile::MultiTenant),
             database: DatabaseConfig {
                 url: None,
                 max_connections: 9,
@@ -1243,6 +1298,7 @@ mod tests {
                 cpus: 4,
                 memory_mib: 2048,
                 cpu_placement: microsandbox_types::CpuPlacement::Spread,
+                placement_profile: None,
                 thp: microsandbox_types::TransparentHugePagePolicy::Always,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
@@ -1277,5 +1333,42 @@ mod tests {
             merged.log_level,
             Some(microsandbox_runtime::logging::LogLevel::Debug)
         );
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_deployment_profile_overrides_persisted_policy() {
+        let base = LocalConfig {
+            deployment_profile: Some(DeploymentProfile::SingleTenant),
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .deployment_profile(DeploymentProfile::MultiTenant)
+            .merge_into(base);
+
+        assert_eq!(
+            merged.deployment_profile,
+            Some(DeploymentProfile::MultiTenant)
+        );
+    }
+
+    #[test]
+    fn builder_ssh_inactivity_timeout_overrides_persisted_default() {
+        let base = LocalConfig {
+            ssh: crate::config::SshConfig {
+                inactivity_timeout_secs: 1800,
+            },
+            ..Default::default()
+        };
+
+        let merged = LocalBackend::builder()
+            .ssh_inactivity_timeout_secs(0)
+            .merge_into(base);
+
+        assert_eq!(merged.ssh.inactivity_timeout_secs, 0);
     }
 }

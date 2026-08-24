@@ -78,7 +78,7 @@ impl SandboxBackend for CloudBackend {
         start: bool,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         Box::pin(async move {
-            let req = CloudCreateBody::try_from(config.clone())?;
+            let (req, config) = cloud_create_body_and_config(config)?;
             let cloud = CloudBackend::create_sandbox(self, &req, start).await?;
             if start {
                 ensure_cloud_sandbox_ready(&cloud)?;
@@ -95,7 +95,7 @@ impl SandboxBackend for CloudBackend {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
         // by msb-cloud, not by this process. Reuse the eager-start path.
         Box::pin(async move {
-            let req = CloudCreateBody::try_from(config.clone())?;
+            let (req, config) = cloud_create_body_and_config(config)?;
             let cloud = CloudBackend::create_sandbox(self, &req, true).await?;
             ensure_cloud_sandbox_ready(&cloud)?;
             Ok(Sandbox::from_cloud(backend, cloud, config))
@@ -257,7 +257,7 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 
     /// Build the cloud create body from an SDK config, rejecting the
     /// create-time options the cloud does not accept.
-    fn try_from(config: SandboxConfig) -> MicrosandboxResult<Self> {
+    fn try_from(mut config: SandboxConfig) -> MicrosandboxResult<Self> {
         if config.replace_existing {
             return Err(MicrosandboxError::unsupported(
                 Operation::SandboxCreate,
@@ -323,6 +323,11 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             }
         }
 
+        // Direct SandboxConfig callers bypass the fluent builder, so impose
+        // the shared path validation and deterministic order at this final
+        // client-side boundary before constructing the cloud wire request.
+        crate::sandbox::validate_volume_mounts(&mut config.spec.mounts)?;
+
         // registry_auth converts into the cloud's credential selection: absent
         // means the cloud picks the stored credential configured for the
         // image's registry host (mirroring the local fallback to configured
@@ -352,6 +357,17 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn cloud_create_body_and_config(
+    mut config: SandboxConfig,
+) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+    // Build the request first to preserve cloud-specific error precedence,
+    // then apply the same successful canonicalization to the config retained
+    // by Sandbox::config().
+    let request = CloudCreateBody::try_from(config.clone())?;
+    crate::sandbox::validate_volume_mounts(&mut config.spec.mounts)?;
+    Ok((request, config))
+}
 
 /// Reject SDK configuration whose meaning is absent from the current cloud
 /// wire shape. Failing at the backend boundary prevents a successful create
@@ -400,6 +416,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("network.tls"));
     }
+    if config.spec.network.rate_limiter.is_some() {
+        return Err(unsupported("network.rate_limiter"));
+    }
 
     if config
         .spec
@@ -409,9 +428,26 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("named volume inline create"));
     }
+    if config.spec.mounts.iter().any(|mount| {
+        let options = match mount {
+            microsandbox_types::VolumeMount::Bind { options, .. }
+            | microsandbox_types::VolumeMount::Named { options, .. }
+            | microsandbox_types::VolumeMount::Tmpfs { options, .. }
+            | microsandbox_types::VolumeMount::DiskImage { options, .. } => options,
+        };
+        options.override_uid.is_some() || options.override_gid.is_some()
+    }) {
+        // Mount ownership is currently a local host-filesystem presentation
+        // policy. Until the cloud control plane advertises this capability,
+        // sending it would let older servers silently ignore access semantics.
+        return Err(unsupported("mount owner"));
+    }
 
     if config.snapshot_upper_source.is_some() {
         return Err(unsupported("from_snapshot"));
+    }
+    if !config.spec.vsock.is_empty() {
+        return Err(unsupported("vsock"));
     }
 
     Ok(())
@@ -571,6 +607,83 @@ mod tests {
         );
         assert_eq!(req.slug, None);
         assert_eq!(req.registry, None);
+    }
+
+    #[test]
+    fn cloud_create_request_orders_direct_config_mounts_parent_first() {
+        let mut config = base_cloud_config();
+        config.spec.mounts = vec![
+            VolumeMount::Tmpfs {
+                guest: "/workspace/persist".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Tmpfs {
+                guest: "/workspace".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        let request = CloudCreateBody::try_from(config).unwrap();
+
+        assert_eq!(
+            request
+                .envelope
+                .spec
+                .mounts
+                .iter()
+                .map(|mount| match mount {
+                    microsandbox_types::CloudVolumeMount::Bind { guest, .. }
+                    | microsandbox_types::CloudVolumeMount::Named { guest, .. }
+                    | microsandbox_types::CloudVolumeMount::Tmpfs { guest, .. }
+                    | microsandbox_types::CloudVolumeMount::DiskImage { guest, .. } => {
+                        guest.as_str()
+                    }
+                })
+                .collect::<Vec<_>>(),
+            vec!["/workspace", "/workspace/persist"]
+        );
+    }
+
+    #[test]
+    fn cloud_create_retains_canonical_mount_config() {
+        let mut config = base_cloud_config();
+        config.spec.mounts = vec![
+            VolumeMount::Tmpfs {
+                guest: "/workspace/persist/.".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+            VolumeMount::Tmpfs {
+                guest: "/workspace/".into(),
+                size_mib: None,
+                options: MountOptions::default(),
+            },
+        ];
+
+        let (request, config) = cloud_create_body_and_config(config).unwrap();
+        let retained = config
+            .spec
+            .mounts
+            .iter()
+            .map(VolumeMount::guest)
+            .collect::<Vec<_>>();
+        let sent = request
+            .envelope
+            .spec
+            .mounts
+            .iter()
+            .map(|mount| match mount {
+                microsandbox_types::CloudVolumeMount::Bind { guest, .. }
+                | microsandbox_types::CloudVolumeMount::Named { guest, .. }
+                | microsandbox_types::CloudVolumeMount::Tmpfs { guest, .. }
+                | microsandbox_types::CloudVolumeMount::DiskImage { guest, .. } => guest.as_str(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(retained, vec!["/workspace", "/workspace/persist"]);
+        assert_eq!(retained, sent);
     }
 
     #[test]
@@ -816,6 +929,26 @@ mod tests {
     }
 
     #[test]
+    fn cloud_create_request_rejects_mount_owner_without_capability() {
+        let mut config = base_cloud_config();
+        config.spec.mounts.push(VolumeMount::Bind {
+            host: "/host/data".into(),
+            guest: "/data".into(),
+            options: MountOptions {
+                override_uid: Some(1000),
+                override_gid: Some(1000),
+                ..MountOptions::default()
+            },
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+        });
+
+        assert_unsupported_config_field(config, "mount owner");
+    }
+
+    #[test]
     fn cloud_create_request_accepts_harmless_omitted_defaults() {
         let mut config = base_cloud_config();
         config.spec.resources.cpus = 2;
@@ -880,6 +1013,25 @@ mod tests {
                 protocol: microsandbox_types::PortProtocol::Tcp,
                 host_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).to_string(),
             });
+        let err = CloudCreateBody::try_from(config).unwrap_err();
+        assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn cloud_create_request_rejects_rate_limiters() {
+        let mut config = base_cloud_config();
+        config.spec.network.rate_limiter = Some(microsandbox_types::NetworkRateLimiterConfig {
+            egress: None,
+            ingress: Some(microsandbox_types::RateLimiterConfig {
+                bandwidth: Some(microsandbox_types::TokenBucketConfig {
+                    size: 1024 * 1024,
+                    refill_time_ms: 1000,
+                    one_time_burst: 0,
+                }),
+                ops: None,
+            }),
+        });
         let err = CloudCreateBody::try_from(config).unwrap_err();
         assert!(matches!(err, MicrosandboxError::Unsupported { .. }));
     }

@@ -23,6 +23,7 @@ mod network_policy_builder;
 mod outbound_proxy_builder;
 mod patch_builder;
 mod pull_progress;
+mod rate_limiter_builder;
 mod registry_builder;
 mod root_disk_builder;
 mod runtime_config;
