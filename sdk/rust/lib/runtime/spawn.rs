@@ -69,6 +69,8 @@ use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
+#[cfg(feature = "net")]
+use super::network_slot::NetworkSlot;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 use crate::runtime::handle::ProcessHandle;
@@ -444,6 +446,26 @@ pub async fn spawn_sandbox(
     #[cfg(windows)]
     let startup_pipe_name = startup_pipe.as_ref().map(|pipe| pipe.name.as_os_str());
 
+    let (writeback_limit_bytes, writeback_pool_bytes) =
+        match block_writeback_policy(&global.runtime) {
+            Ok(policy) => policy,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
+
+    // #1390: lease from active sandboxes instead of deriving the slot from the
+    // ever-increasing sandbox ID.
+    #[cfg(feature = "net")]
+    let network_slot = match NetworkSlot::lease(local, sandbox_id).await {
+        Ok(slot) => slot,
+        Err(err) => {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(err);
+        }
+    };
+
     // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
     // delivered over the config fd (keeps the network-config blob and
     // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
@@ -451,6 +473,8 @@ pub async fn spawn_sandbox(
         local,
         config,
         sandbox_id,
+        #[cfg(feature = "net")]
+        network_slot,
         &db_path,
         global.database.connect_timeout_secs,
         &log_dir,
@@ -474,7 +498,6 @@ pub async fn spawn_sandbox(
         #[cfg(windows)]
         startup_pipe_name,
     );
-    let (writeback_limit_bytes, writeback_pool_bytes) = block_writeback_policy(&global.runtime)?;
     tracing::debug!(
         per_disk_limit_bytes = ?writeback_limit_bytes,
         pool_bytes = ?writeback_pool_bytes,
@@ -2348,12 +2371,12 @@ fn guest_mount_tag(guest_path: &str) -> String {
     out
 }
 
-/// Build the `msb sandbox` CLI args for a sandbox.
 #[allow(clippy::too_many_arguments)]
 fn sandbox_cli_args(
     local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
+    #[cfg(feature = "net")] network_slot: NetworkSlot,
     db_path: &Path,
     db_connect_timeout_secs: u64,
     log_dir: &Path,
@@ -2738,7 +2761,7 @@ fn sandbox_cli_args(
                 .local_network_config()
                 .expect("sandbox network spec should decode to local network config"),
         );
-        launch.sandbox_slot = sandbox_id as u64;
+        launch.sandbox_slot = network_slot.get();
     }
 
     (visible, launch)
@@ -2811,6 +2834,8 @@ mod tests {
 
     use microsandbox_runtime::launch::LaunchConfig;
 
+    #[cfg(feature = "net")]
+    use super::NetworkSlot;
     #[cfg(target_os = "linux")]
     use super::{
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
@@ -2895,6 +2920,11 @@ mod tests {
         LocalBackend::lazy()
     }
 
+    #[cfg(feature = "net")]
+    fn test_network_slot() -> NetworkSlot {
+        NetworkSlot::try_from(1).unwrap()
+    }
+
     /// Return the typed launch payload generated for a sandbox configuration.
     fn render_launch(config: &SandboxConfig) -> LaunchConfig {
         let local = test_local_backend();
@@ -2902,6 +2932,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3148,6 +3180,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3230,6 +3264,18 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn sandbox_cli_args_uses_the_supplied_network_slot() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(render_launch(&config).sandbox_slot, 1);
+    }
+
     /// Render only the `visible` argv (what shows up in `ps`).
     fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
         let local = test_local_backend();
@@ -3237,6 +3283,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3265,6 +3313,8 @@ mod tests {
             &local,
             config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3347,6 +3397,8 @@ mod tests {
             &local,
             &config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
@@ -3422,6 +3474,8 @@ mod tests {
             &local,
             &config,
             42,
+            #[cfg(feature = "net")]
+            test_network_slot(),
             Path::new("/tmp/msb.db"),
             30,
             Path::new("/tmp/logs"),
