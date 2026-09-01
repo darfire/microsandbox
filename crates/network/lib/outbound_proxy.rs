@@ -134,22 +134,27 @@ pub trait OutboundProxyConfig {
 impl OutboundProxy {
     /// Connects to `destination` through this outbound proxy.
     pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
+        self.validate().map_err(io::Error::other)?;
         match self {
-            Self::Socks4 { address, user_id } => {
-                Self::validate_socks4_user_id(user_id.as_deref()).map_err(io::Error::other)?;
-                match user_id {
-                    Some(user_id) => {
-                        Socks4Stream::connect_with_userid(*address, destination, user_id).await
-                    }
-                    None => Socks4Stream::connect(*address, destination).await,
+            Self::Socks4 { address, user_id } => match user_id {
+                Some(user_id) => {
+                    Socks4Stream::connect_with_userid(*address, destination, user_id).await
                 }
-                .map(|stream| stream.into_inner())
-                .map_err(io::Error::other)
+                None => Socks4Stream::connect(*address, destination).await,
             }
+            .map(|stream| stream.into_inner())
+            .map_err(io::Error::other),
             Self::Socks5 { address } => Socks5Stream::connect(*address, destination)
                 .await
                 .map(|stream| stream.into_inner())
                 .map_err(io::Error::other),
+        }
+    }
+
+    fn validate(&self) -> Result<(), OutboundProxyBuildError> {
+        match self {
+            Self::Socks4 { user_id, .. } => Self::validate_socks4_user_id(user_id.as_deref()),
+            Self::Socks5 { .. } => Ok(()),
         }
     }
 
@@ -240,6 +245,7 @@ impl OutboundProxyConfig for Socks5ProxyBuilder {
 
 impl OutboundProxyConfig for OutboundProxy {
     fn build(self) -> Result<OutboundProxy, OutboundProxyBuildError> {
+        self.validate()?;
         Ok(self)
     }
 }
@@ -402,6 +408,18 @@ mod tests {
                     .build()
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn materialized_proxy_rejects_invalid_socks4_user_ids() {
+        for user_id in [String::new(), "a\0b".to_string(), "a".repeat(256)] {
+            let proxy = OutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: Some(user_id),
+            };
+
+            assert!(proxy.build().is_err());
         }
     }
 

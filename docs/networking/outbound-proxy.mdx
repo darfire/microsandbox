@@ -1,10 +1,10 @@
 ---
 title: Outbound proxy
-description: Route all outbound sandbox TCP traffic through an external SOCKS proxy
+description: Route external outbound sandbox TCP traffic through a SOCKS proxy
 icon: "route"
 ---
 
-Point a sandbox's entire outbound TCP traffic at an external SOCKS4 or SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
+Point a sandbox's external outbound TCP traffic at a SOCKS4 or SOCKS5 proxy, without the guest knowing a proxy exists. The guest keeps dialing its normal destinations; the host, on its side of the boundary, dials the configured proxy and asks it to `CONNECT` to the real destination instead of connecting directly.
 
 <Note>This setting is available for local sandboxes. Cloud sandbox specs do not expose user-configured egress proxies.</Note>
 
@@ -129,6 +129,7 @@ Without one of these CA configurations, mitmproxy can record the TCP connection 
 
 - **TCP only.** UDP traffic (including plain DNS on port 53) is not routed through the proxy. SOCKS5's `UDP ASSOCIATE` command isn't used here; SOCKS4 has no UDP relay command.
 - **DNS resolution bypasses it too.** DNS-over-TCP and DNS-over-TLS both go through microsandbox's own DNS forwarder, not the configured proxy, regardless of protocol.
+- **Host-local connections bypass it.** Connections to `host.microsandbox.internal` still target the microsandbox host directly. Sending their rewritten loopback address through a remote SOCKS proxy would target the proxy host instead.
 - **SOCKS4 destinations must be IPv4.** SOCKS4 cannot carry IPv6 destination addresses, and microsandbox does not use the SOCKS4a domain-name extension.
 - **One proxy connection per sandbox connection.** Each guest TCP connection opens a new TCP connection and handshake to the proxy; connections are not multiplexed.
 - **No SOCKS5 authentication.** Only the no-auth SOCKS5 handshake is supported; point this at a local or otherwise trusted proxy. A SOCKS4 user ID is not password authentication.
